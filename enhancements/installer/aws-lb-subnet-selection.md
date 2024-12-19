@@ -15,7 +15,7 @@ approvers:
 api-approvers:
 - "@JoelSpeed"
 creation-date: 2024-05-29
-last-updated: 2024-12-10
+last-updated: 2024-12-18
 tracking-link:
   - https://issues.redhat.com/browse/CORS-3440
 see-also:
@@ -29,15 +29,16 @@ superseded-by:
 
 ## Summary
 
-This proposal enables the install-time configuration of subnets for the `default` IngressController
-as well as the default subnets for any user-created IngressController by extending the OpenShift
-Installer's install-config for AWS clusters. It also fixes a common issue where load balancers would
+This proposal extends the OpenShift Installer's install-config for AWS to enable install-time configuration
+of subnets for IngressControllers, including the `default` IngressController and user-created IngressControllers,
+as well as the control plane load balancers. It also fixes a common issue where load balancers would
 map to unintended subnets ([OCPBUGS-17432](https://issues.redhat.com/browse/OCPBUGS-17432)).
 
 To achieve this, this enhancement deprecates the existing install-config field `platform.aws.subnets`
-in favor of a more flexible configuration field that handles specifying subnets for both
-IngressControllers and the cluster infrastructure. These new subnet roles, referred to as
-IngressController-role subnets and Cluster-role subnets are further defined in [Defining Subnet Roles](#defining-subnets-roles).
+in favor of a more flexible configuration field that handles specifying subnets for IngressControllers,
+control plane load balancers, and the cluster nodes. These new subnet roles, referred to as
+IngressControllerLB, ControlPlaneExternalLB, ControlPlaneInternalLB, and ClusterNode subnets
+are further defined in [Defining Subnet Roles](#defining-subnets-roles).
 
 ## Definitions and Terminology
 
@@ -56,40 +57,48 @@ It represents all IngressControllers except for the `default` IngressController.
 
 ### Defining Subnets Roles
 
-With the install-config now able to specify two different ways a subnet could be used, it's important
+With the install-config now able to specify multiple ways a subnet could be used, it's important
 to clarify what these uses are. We will define the function, purpose, or use of a subnet as a "role".
 We use the concept of roles to recognize that a single subnet can simultaneously fulfill multiple roles.
 
-Let's define the two subnet roles. The role associated with the existing `platform.aws.subnets` field
-will be defined as the "cluster subnet role". Additionally, this enhancement proposes a new subnet
-role for hosting IngressControllers, which will be defined as the "IngressController subnet role".
+Let's define the new subnet roles:
 
-_Note: These roles are defined only to establish a common language within the context of the install-config
-and may not be applicable to other environments, situations, or APIs._
+**ClusterNode Subnet Role**
 
-**Cluster Subnet Role**
+Subnets with this role host the cluster nodes, including both control plane and compute nodes.
+Additionally, they serve important functions such as locating the VPC for cluster installation
+and determining the Availability Zones for the cluster. Generally these are private subnets,
 
-Subnets with this role hosts a majority of cluster infrastructure resources, including instances (nodes)
-and the External and Internal API load balancers. Additionally, they serve important functions such
-as locating the VPC for cluster installation and determining the Availability Zones for the cluster.
-
-**IngressController Subnet Role**
+**IngressControllerLB Subnet Role**
 
 Subnets with this role are designated as the default subnets for hosting AWS load balancers created
 specifically for IngressControllers. This role does not include load balancers created from generic
 LoadBalancer-type Services, but only those from IngressControllers.
 
+**ControlPlaneExternalLB Subnet Role**
+
+Subnets with this role are designated as subnets for the control plane's **external** load balancer
+that serves the Kubernetes API server.
+
+**ControlPlaneInternalLB Subnet Role**
+
+Subnets with this role are designated as subnets for the control plane **internal** load balancers
+that serves the Kubernetes API server.
+
+_Note: These roles are defined only to establish a common language within the context of the install-config
+and may not be applicable to other environments, situations, or APIs._
+
 ### Clarifying Subnet Roles Terminology
 
-For the sake of simplicity, we will refer to "IngressController-role subnets" as subnets that fulfill
-at least the IngressController subnet role, but are not limited to it. Similarly, "Cluster-role subnets"
-will refer to subnets that fulfill at least the cluster subnet role, but are not limited to it.
+For simplicity, "IngressControllerLB subnets," "ControlPlaneExternalLB subnets," "ControlPlaneInternalLB subnets"
+and "ClusterNode subnets" refer to subnets that fulfill their respective roles, but may also serve other roles.
+Additionally, this proposal will use "ControlPlaneLB subnets" to mean both ControlPlaneExternalLB and
+ControlPlaneInternalLB subnets; however "ControlPlaneLB" is NOT an official subnet role.
 
 When this proposal refers to a "IngressController subnet", it is generically referring to a subnet that associated with
-an IngressController's load balancer, not specifically a subnet that was specified with the IngressController-role
+an IngressController's load balancer, not specifically a subnet that was specified with the IngressControllerLB role
 in the install-config, as these can differ. However, this proposal will avoid using the term "cluster subnet",
-due to its ambiguity; a "cluster subnet" could refer to a subnet that exists in the same VPC, one that has
-instances belonging to it, or one that carries the `kubernetes.io/cluster/<cluster-id>` tag of the cluster.
+due to its ambiguity; it is unclear whether it refers to a ClusterNode, IngressControllerLB, or ControlPlaneLB subnet.
 
 ## Motivation
 
@@ -98,15 +107,16 @@ security reasons, architecture, or infrastructure constraints. They may be insta
 a cluster into a VPC with multiple Availability Zones (AZs) containing untagged subnets, but
 they wish to restrict their cluster to a single AZ.
 
-Currently, cluster admins can configure their load balancer subnets after installation (Day 2) by configuring
+Currently, cluster admins can configure their IngressController subnets after installation (Day 2) by configuring
 the `spec.endpointPublishingStrategy.loadBalancer.providerParameters.aws.classicLoadBalancer.subnets`
-or `...aws.networkLoadBalancer.subnets` fields on the IngressController (see [LoadBalancer Subnet Selection for AWS](/enhancements/ingress/lb-subnet-selection-aws.md)).
-Cluster admins also need a way to configure their IngressController default subnets at install time (Day 1).
+or `...aws.networkLoadBalancer.subnets` fields (see [LoadBalancer Subnet Selection for AWS](/enhancements/ingress/lb-subnet-selection-aws.md)).
+However, there is no way to explicitly configure the ControlPlaneLB subnets. Cluster admins also need a way to
+configure both ControlPlaneLB and IngressControllerLB subnets at install time (Day 1) using the install-config.
 
 Configuring subnets at install time is essential for cluster admins that want to
-ensure their `default` IngressController is configured properly from the start. Additionally,
+ensure their load balancer subnets are configured properly from the start. Additionally,
 Service Delivery has use cases for ROSA Hosted Control Plane (HCP) that require the `default`
-IngressController subnets to be configured during cluster installation.
+IngressController and ControlPlaneLB subnets to be configured during cluster installation.
 
 ### AWS Subnet Discovery
 
@@ -117,7 +127,12 @@ a subnet will **NOT** be selected if:
 - The `kubernetes.io/cluster/<cluster-id>` tag contains the cluster ID of another cluster.
 - The load balancer is external (internet facing) and the subnet is private.
 - A subnet for the same AZ has already been chosen based on lexicographical order.
-- The subnet type is a wavelength or local.
+- The subnet type is a `wavelength` or `local`.
+
+_Note: Subnet discovery, as defined here, applies only to IngressControllerLB subnets and not to ControlPlaneLB subnets.
+While the Cluster API Provider AWS ([CAPA](https://github.com/kubernetes-sigs/cluster-api-provider-aws)) does some subnet
+filtering, it relies on the list of [provided subnets](https://github.com/kubernetes-sigs/cluster-api-provider-aws/blob/8f46a4d34d18cb090a4b48c9a9260cd3dffd9162/api/v1beta2/network_types.go#L340)
+from the openshift-installer. As a result, ControlPlaneLB subnets are NOT impacted by [OCPBUGS-17432](https://issues.redhat.com/browse/OCPBUGS-17432)._
 
 However, the current subnet discovery implementation has some limitations:
 
@@ -132,17 +147,18 @@ subnet discovery.
 
 ### User Stories
 
-#### Dedicated IngressController Subnets User Story
+#### Dedicated Load Balancer Subnets User Story
 
 _"As a cluster admin, I want to install a cluster into an existing VPC and
-configure my IngressControllers to use dedicated ingress subnets so that I can fulfill
+configure all of my load balancers to use dedicated subnets so that I can fulfill
 my organization's requirements for security, observability, and network segmentation."_
 
 Some enterprise customers have strict requirements to isolate subnets used for their
 load balancers. They set up a self-managed VPC with dedicated subnets for load balancers
-and require OpenShift to be installed into this configuration.
+and require OpenShift to be installed into this configuration. Users may need to isolate
+ControlPlaneLB subnets from IngressControllerLB subnets, resulting in multiple sets of dedicated subnets.
 
-See [Specifying Dedicated IngressController-role Subnets During Installation with a BYO VPC Workflow](#specifying-dedicated-ingresscontroller-role-subnets-during-installation-with-a-byo-vpc-workflow)
+See [Specifying Dedicated IngressControllerLB Subnets During Installation with a BYO VPC Workflow](#specifying-dedicated-ingresscontroller-role-subnets-during-installation-with-a-byo-vpc-workflow)
 for the workflow for this user story.
 
 #### Do Not Use Untagged Subnets User Stories
@@ -152,14 +168,17 @@ other untagged subnets and I want my IngressControllers to be restricted to the 
 subnets, so that my load balancers are not unnecessarily mapped to an AZ they aren't
 intended for."_
 2. _"As a cluster admin, I want to install a private cluster into an existing VPC that
-contains other untagged subnets and I want my `default` IngressController to only use
+contains other untagged subnets and I want my IngressControllers to be restricted to
 private subnets, so that it is not exposed to the public Internet."_
 
-When a cluster admin installs a cluster into an existing VPC with additional non-Cluster-role
+When a cluster admin installs a cluster into an existing VPC with additional non-ClusterNode-role
 subnets that are selected by [AWS Subnet Discovery](#aws-subnet-discovery), IngressControllers may
 inadvertently use these other subnets, which might be allocated to other cluster or purposes
 (see related [RFE-2816](https://issues.redhat.com/browse/RFE-2816) and [OCPBUGS-17432](https://issues.redhat.com/browse/OCPBUGS-17432)).
 Allowing load balancers to access unintended subnets can lead to bugs and pose security risks.
+
+_Note: ControlPlaneLB subnets are NOT impacted by this user story because they do not use
+[AWS Subnet Discovery](#aws-subnet-discovery)._
 
 If explicitly specifying subnets, this use case will be addressed by the
 [Setting IngressController Subnets with BYO VPC during Installation Workflow](#setting-ingresscontroller-subnets-with-byo-vpc-during-installation-workflow).
@@ -168,40 +187,43 @@ is to reject untagged subnets in new installations.
 
 #### ROSA Installation User Story
 
-_"As a ROSA Engineer, I want the ability to specify the default IngressController subnets
+_"As a ROSA Engineer, I want the ability to specify my load balancer subnets
 in the install-config so that I can accommodate installer mechanisms (e.g., Hive) that
 don’t support customizing installer manifests."_
 
 Though users can currently [customize](https://github.com/openshift/installer/blob/master/docs/user/customization.md#kubernetes-customization-unvalidated)
-the `default` IngressController installer manifest, this customization is not supported for ROSA
-installations (Classic and HCP). This use case drives the need for an install-config API.
+the `default` IngressController and ControlPlaneLB subnets via installer manifests, this customization is not supported
+for ROSA installations (Classic and HCP). This use case drives the need for an install-config API.
 
 ### Goals
 
 - Deprecate the `platform.aws.subnets` field in the install-config and add a
-  new more flexible subnet field for subnet-related configuration.
+  new, more flexible subnet field for subnet-related configuration.
 - Enable users to explicitly configure the subnets for the `default` IngressController on AWS
-  through the install-config (i.e. IngressController-role subnets).
-- Enable users to still use AWS Subnet Discovery.
+  through the install-config (i.e. IngressControllerLB subnets).
+- Enable users to still use AWS Subnet Discovery for IngressControllers.
+- Enables users to explicitly configure the subnets for the ControlPlaneExternalLB and ControlPlaneInternalLB subnets.
+- Enable automatic subnet role selection (no opinion)
 - Prevent AWS Subnet Discovery from selecting subnets that do not belong to the cluster.
-- Provide install-time validation for user-provided IngressController-role subnets.
-- Maintain support for configuring the `default` IngressController subnets via customizing the installer manifest.
+- Provide install-time validation for all user-provided subnets roles.
+- Maintain support for configuring the `default` IngressController or ControlPlaneLB subnets via customizing the
+  installer manifest.
 
 ### Non-Goals
 
 - Extend support to platforms other than AWS.
-- Assume that Cluster-role subnets are also IngressController-role subnets.
-- Assume that IngressController-role subnets are also Cluster-role subnets.
 - Support install-time subnet configuration for LoadBalancer-type Services that aren't associated with an IngressController.
 - Remove the `platform.aws.subnets` install-config field.
+- Support separate configuration of subnets for compute nodes and control plane nodes.
+- Combine ControlPlaneExternalLB and ControlPlaneInternalLB subnet roles into a single role.
 
 ## Proposal
 
-To enable cluster admins to specify subnets for IngressControllers at install time, we will need
+To enable cluster admins to specify subnets for IngressControllers and ControlPlaneLBs at install time, we will need
 to make the following updates:
 
 1. Deprecate the `platform.aws.subnets` field in the install-config and add a new
-   `platform.aws.subnetsConfig`, which more intuitively manages multiple subnet roles.
+   `platform.aws.subnetsConfig` field, which allow users to manage subnet roles.
 2. Add the `spec.loadBalancer.platform.aws.classicLoadBalancer.subnets` and
    `...aws.networkLoadBalancer.subnets` fields in the ingresses.config.openshift.io
    (Ingress Config) CRD to encode the default subnets for IngressControllers.
@@ -210,14 +232,23 @@ to make the following updates:
 ### InstallConfig API Proposal
 
 The proposal to deprecate the `platform.aws.subnets` field in the install-config is driven by
-its ambiguity, as the field name does not clearly distinguish between IngressController-role subnets and Cluster-role
-subnets, which can be different. Additionally, `platform.aws.subnets` is a `[]string` and doesn't
+its ambiguity, it does not distinguish between subnet roles. Additionally, `platform.aws.subnets` is a `[]string` and doesn't
 allow for future expansion or adaptation for other subnet type, roles, or metadata information. The new 
 install-config field that will enable this feature will be `platform.aws.subnetsConfig`.
 
-If no IngressController-role subnets are specified in `platform.aws.subnetsConfig`, no subnets will be specified for
-the IngressController. Therefore, the AWS CCM will continue to use [AWS Subnet Discovery](#aws-subnet-discovery)
-to select subnets for the reasons outlined in that section.
+#### Manual vs. Automatic Role Selection
+
+Automatic role selection is when the installer, CAPA, AWS CCM, or other components automatically determine how the
+provided subnets are used. Currently, the installer performs automatic role selection with the `platform.aws.subnets`
+field, as it does not provide a way to override these decisions. The new `platform.aws.subnetsConfig` field will
+continue to support automatic role selection for users who prefer a standard, opinionated default cluster subnet
+config, but only if no roles are explicitly assigned to any subnet. For IngressControllers, using automatic role
+selection enables the AWS CCM to use [AWS Subnet Discovery](#aws-subnet-discovery) as it did previously with
+`platform.aws.subnets`.
+
+Manual role selection is when the cluster admin assigns roles to the provided subnets, and the installer
+explicitly configures the subnets to be used in accordance to the user's role selection. Every subnet must have
+a role, and each role must be assigned to at least one subnet.
 
 ### Ingress Config API Proposal
 
@@ -232,21 +263,21 @@ enhancement introduced the `spec.loadBalancer.platform.aws.lbType` field.
 In BYO VPCs, untagged subnets are nuisance as the AWS CCM may select them, leading to various bugs, RFEs, and
 support cases. Since this proposal introduces a new subnet install-config field, it's a great opportunity
 to introduce a new behavior which will provide a better user experience. If `platform.aws.subnetsConfig`
-is specified without any IngressController-role subnets (i.e. subnet discovery), the installer will inspect
+is specified to use automatic role selection (i.e. subnet discovery), the installer will inspect
 the VPC for untagged subnets and reject the installation if any exist. 
 
 ### Implementation Details/Notes/Constraints
 
-As mentioned in [the Proposal section](#proposal), the install-config and the Ingress Config will be updated
-to support propagating default subnets to all new IngressControllers, including the `default`
-IngressController. The Ingress Operator will also need to be updated to use the new Ingress Config
-`Subnet` fields.
+As mentioned in [the Proposal section](#proposal), the install-config and the installer will be updated
+to support propagating explicit subnet selection to IngressControllers and the control plane load balancers.
+The Ingress Config and the Ingress Operator will be updated to support propagating default subnets to all
+new IngressControllers, including the `default` IngressController.
 
 #### Installer Updates
 
 The `platform.aws.subnets` field in the install-config will be deprecated and replaced with a new
 field, `platform.aws.subnetsConfig`. Much like `Subnets`, the new `SubnetsConfig` field indicates
-a list of subnets in a pre-existing VPC, but also provide the role that the subnet will fulfill in the
+a list of subnets in a pre-existing VPC, but also can optionally override the roles that the subnet will fulfill in the
 cluster. Additionally, since it is a struct and not a `[]string`, it provide the ability to be
 expanded with additional subnet-related fields in the future.
 
@@ -270,17 +301,21 @@ type Platform struct {
     // +optional
     Subnets []string `json:"subnets,omitempty"`
 
-    // subnetsConfig specifies the subnet configuration for
-    // a cluster by specifying a list of subnet ids with their
-    // designated roles. At least one Cluster role subnet must be
-    // specified. If no IngressController role subnets are specified, the
-    // IngressController's Load Balancer will automatically discover
-    // its subnets based on the kubernetes.io/cluster/<cluster-id> tag,
-    // whether it's public or private, and the availability zone.
-    // In this case, the VPC must not contain any subnets without
-    // the kubernetes.io/cluster/<cluster-id> tag. IngressController role
-    // subnets specify the subnets used by the default IngressController and 
-    // serve as the default for user-created IngressControllers.
+    // subnetsConfig defines the subnets in an existing VPC  
+    // and specifies their intended roles for use by the installer.
+    // If no roles are overridden on any subnet, then the subnet roles
+	// are decided automatically. In this case, the VPC must not contain
+	// any subnets without the kubernetes.io/cluster/<cluster-id> tag.
+	//
+	// For overridden subnet role selection, each subnet must have at
+	// least one assigned role, and all roles (ClusterNode, IngressControllerLB,
+	// ControlPlaneExternalLB, ControlPlaneInternalLB) must be assigned to
+	// at least one subnet.
+	// 
+	// The IngressControllerLB role override specifies the subnets used by the
+	// default IngressController and serve as the default for user-created
+	// IngressControllers.
+    // 
     // Leave this field unset to have the installer create subnets
     // in a new VPC on your behalf. subnetsConfig must contain unique IDs 
     // and must not contain more than 10 subnets with the IngressController
@@ -290,8 +325,8 @@ type Platform struct {
     // +optional
     // +listType=atomic
     // +kubebuilder:validation:XValidation:rule=`self.all(x, self.exists_one(y, x.id == y.id))`,message="subnetsConfig cannot contain duplicate IDs" 
-    // +kubebuilder:validation:XValidation:rule=`self.exists(x, x.roles.exists(r, r == 'Cluster'))`,message="subnetsConfig must contain at least 1 subnet with the Cluster role"
-    // +kubebuilder:validation:XValidation:rule=`self.filter(x, x.roles.exists(r, r == 'Ingress')).size() <= 10`,message="subnetsConfig must contain less than 10 subnets with the IngressController role"
+    // +kubebuilder:validation:XValidation:rule=`self.exists(x, x.roles.exists(r, r == 'ClusterNode'))`,message="subnetsConfig must contain at least 1 subnet with the ClusterNode role"
+    // +kubebuilder:validation:XValidation:rule=`self.filter(x, x.roles.exists(r, r == 'IngressControllerLB')).size() <= 10`,message="subnetsConfig must contain less than 10 subnets with the IngressControllerLB role"
     SubnetsConfig []SubnetConfig `json:"subnetsConfig,omitempty"`
 }
 
@@ -304,14 +339,15 @@ type SubnetConfig struct {
     // +required
     ID AWSSubnetID `json:"id"`
 
-    // roles specifies the roles (aka functions) that the
-    // subnet will provide in the cluster. Each role must be
-    // unique.
+    // rolesOverride manually overrides the roles (aka functions)
+	// that the subnet will provide in the cluster. If no roles are
+	// specified on any subnet, then the subnet roles are decided
+	// automatically. Each role must be unique.
     //
-    // +required
+    // +optional
     // +listType=atomic
-    // +kubebuilder:validation:XValidation:rule=`self.all(x, self.exists_one(y, x == y))`,message="roles cannot contain duplicates"
-    Roles []SubnetRole `json:"roles"`
+    // +kubebuilder:validation:XValidation:rule=`self.all(x, self.exists_one(y, x == y))`,message="rolesOverride cannot contain duplicates"
+    RolesOverride []SubnetRole `json:"rolesOverride"`
 }
 
 // AWSSubnetID is a reference to an AWS subnet ID.
@@ -324,13 +360,21 @@ type AWSSubnetID string
 type SubnetRole string
 
 const (
-    // ClusterSubnetRole specifies subnets that will be used as subnets for the nodes,
+    // ClusterNodeSubnetRole specifies subnets that will be used as subnets for the nodes,
     // API load balancers, and for locating the VPC and Availability Zones.
-    ClusterSubnetRole SubnetRole = "Cluster"
+    ClusterNodeSubnetRole SubnetRole = "ClusterNode"
 
     // IngressControllerSubnetRole specifies subnets used by the default IngressController and
     // serve as the default for user-created IngressControllers.
-    IngressControllerSubnetRole SubnetRole = "IngressController"
+    IngressControllerSubnetRole SubnetRole = "IngressControllerLB"
+
+    // ControlPlaneExternalLBSubnetRole specifies subnets used by the external control plane
+	// load balancer that serves the Kubernetes API server.
+    ControlPlaneExternalLBSubnetRole SubnetRole = "ControlPlaneExternalLB" 
+
+    // ControlPlaneInternalLBSubnetRole specifies subnets used by the internal control plane
+    // load balancer that serves the Kubernetes API server.
+	ControlPlaneInternalLBSubnetRole SubnetRole = "ControlPlaneInternalLB"
 )
 ```
 
@@ -339,20 +383,21 @@ will be deprecated when `SubnetsConfig` graduates to GA.
 
 ##### Installer Validation Rules
 
-###### At Least One Cluster-role Subnet
+###### All or Nothing Subnet Roles Selection
 
-For BYO VPCs, the installer enforces that at least one `SubnetConfig` has the `Cluster` role as
-a cluster cannot be installed without a Cluster-role subnet.
+This proposed API follows an "all or nothing" approach for roles: either all roles must be explicitly assigned
+(manual role selection), or no roles must be assigned (automatic role selection). The installer must not allow a mix of
+automatic and manual role assignments, as this could lead to confusing behavior.
 
 ###### All Subnets Belong to the Same VPC Validation
 
 The [existing validation](https://github.com/openshift/installer/blob/0d77aa8df5ddc68e926aa11da24a87981021b256/pkg/asset/installconfig/aws/subnet.go#L91)
 for the deprecated `Subnets` field ensuring all subnets belong to the same VPC
-should apply to all subnets (`IngressController` and `Cluster`) specified in `SubnetsConfig`.
+should apply to all subnets specified in `SubnetsConfig`.
 
-###### Multiple IngressController-role Subnets in the Same AZ Validation
+###### Multiple Load Balancer Subnets in the Same AZ Validation
 
-The installer must reject multiple `IngressController` role subnets in the same AZ as this will be
+The installer must reject multiple `IngressControllerLB` role subnets in the same AZ as this will be
 rejected by the AWS CCM.
 
 ###### SubnetsConfig and Subnets Cannot be Specified Together Validation
@@ -365,36 +410,45 @@ be specified.
 Since the IngressController's API [only allows 10 subnets](https://github.com/openshift/api/blob/ee5bb7eaf6b6638d4e3b33ba4ff0834212cdb75d/operator/v1/types_ingress.go#L564),
 the installer must not allow more than 10 IngressController subnets as well.
 
-###### Consistent Cluster Scope with IngressController-Role Subnets Validation
+###### Consistent Cluster Scope with IngressControllerLB Subnets Validation
 
-The installer must not allow **any** public IngressController-role subnets for private clusters (`installconfig.publish: Internal`)
+The installer must not allow **any** public IngressControllerLB subnets for private clusters (`installconfig.publish: Internal`)
 as this is a security risk as discussed in the [Do Not Use Untagged Subnets User Stories](#do-not-use-untagged-subnets-user-stories) section.
 
-Conversely, the installer must now allow **any** private IngressController-role subnets for public clusters
+Conversely, the installer must now allow **any** private IngressControllerLB subnets for public clusters
 (`installconfig.publish: External`) as the public IngressController will not function with private subnets.
+
+###### Consistent Cluster Scope with ControlPlaneLB Subnets Validation
+
+The installer must not allow **any** public subnets to be specified with the ControlPlaneInternalLB role and must
+not allow **any** private subnets to be specified with the ControlPlaneExternalLB role.
+
+Private clusters (`installconfig.publish: Internal`) should reject an install-config containing
+anyControlPlaneExternalLB roles, as only an internal control plane load balancer will be created.
 
 ###### Reject BYO VPC Installations that Contain Untagged Subnets
 
 As described in [Rejecting Untagged Subnets Proposal](#rejecting-untagged-subnets-proposal), the installer
 must not allow installation into an existing VPC if it contains subnets lacking the `kubernetes.io/cluster/<cluster-id>`
-tag when no IngressController-role subnets are specified. The error message should instruct the user to add a
+tag when subnets roles are not specified. The error message should instruct the user to add a
 `kubernetes.io/cluster/unmanaged` tag to any subnets they wish to exclude from this cluster installation or
 configure the subnets with the Cluster or IngressController role in `platform.aws.subnetsConfig`.
 
-###### Reject IngressControllers AZs that do not match Cluster AZs
+###### Reject IngressControllers or ControlPlaneLB AZs that do not match ClusterNode AZs
 
-When `platform.aws.subnetsConfig` is specified, the installer should ensure that the IngressController
-AZs (defined by the IngressController-role subnets) match the cluster AZs (defined by the Cluster-role
-subnets) and reject installations where the two sets are not equal.
+When manual role selection is specified, the installer must ensure that the AZs for the IngressController
+(defined by the IngressControllerLB subnets) and control plane (defined by the ControlPlaneExternalLB and
+ControlPlaneInternal subnets) match the cluster AZs (defined by the ClusterNode subnets). The installer must
+reject installations where the AZs are not equal.
 
 AWS load balancers will NOT register a node located in an AZ that is not enabled. As a result, if the
-cluster includes an AZ that is not a IngressController AZ, the router pod might be scheduled to a
-node that the load balancer cannot reach. Conversely, if the IngressController includes an AZ that is not
-a cluster AZ, there will be no nodes in that AZ for the load balancer to register.
+nodes use an AZ that is not a load balancer AZ, the router pod might be scheduled to  node that the load balancer
+cannot reach. Conversely, if the load balancer includes an AZ that is not a node AZ, there will be no nodes in that
+AZ for the load balancer to register.
 
-##### Configuring Installer Manifests
+##### Installer-Generated Manifests Updates
 
-The installer will apply the specified IngressController-role subnets to the `default` IngressController and the
+The installer will apply the specified IngressControllerLB subnets to the `default` IngressController and the
 `cluster` Ingress Config manifests within the `generateDefaultIngressController` and `generateClusterConfig`
 functions respectively.
 
@@ -402,6 +456,25 @@ Since the `cluster` Ingress Config also defaults the subnets for the `default` I
 we don't need to specify them in the `default` IngressController manifest. However, explicitly configuring
 the subnets in the `default` IngressController manifest is more verbose and can make debugging installations
 more straightforward.
+
+##### Installer ControlPlaneLB Subnets Configuration Updates
+
+The installer will configure the ControlPlaneInternalLB subnets in the `spec.controlPlaneLoadBalancer.subnets`
+field of the CAPI AWSCluster object, while the ControlPlaneExternalLB subnets will be set in the
+`spec.secondaryControlPlaneLoadBalancer.subnets` field.
+
+##### Installer ClusterNode Subnets Configuration Updates
+
+The installer will configure the ClusterNode subnets in each of the `spec.subnet` fields of the CAPI AWSMachine
+objects for the control plane nodes and in the subnet field of the MachineSets for the compute nodes.
+
+##### Installer Subnet Tagging
+
+All public and private subnets specified in the `platform.aws.subnetsConfig` field, regardless of their role, must be
+tagged with the `kubernetes.io/cluster/<cluster-id>: shared` tag. Currently, edge subnets are not tagged by the
+installer and should continue to be excluded. These tags assist the AWS CCM in identifying which subnets to use
+during [AWS Subnet Discovery](#aws-subnet-discovery) for both the cluster being installed and any other clusters
+that may be installed within the same VPC.
 
 #### Ingress Config API Updates
 
@@ -532,14 +605,14 @@ No validation for this new Ingress Config API will be added to the Ingress Opera
 
 ### Workflow Description
 
-#### Setting IngressController Subnets with BYO VPC during Installation Workflow
+#### Specifying Manual Subnet Roles with BYO VPC during Installation Workflow
 
-Setting the default subnets for all IngressControllers (including the `default` IngressController)
-during installation (Day 1):
+A cluster-admin may prefer to explicitly set the default subnets for all IngressControllers (including the `default`
+IngressController) during installation (Day 1) rather than relying on [AWS Subnet Discovery](#aws-subnet-discovery).
+In order to do this, they must assign all the subnet roles:
 
 1. Cluster admin creates an install-config with `platform.aws.subnetsConfig` specified
-   with the subnet(s) while ensuring the `platform.aws.subnetsConfig[].roles` field is
-   configured with `IngressController` and `Cluster`:
+   with subnets that manually override the subnet roles:
     ```yaml
     apiVersion: v1
     baseDomain: devcluster.openshift.com
@@ -550,19 +623,20 @@ during installation (Day 1):
       aws:
         region: us-east-2
         subnetsConfig:
-        - id: subnet-0fcf8e0392f0910d0
-          roles:
-          - IngressController
-          - Cluster
-        - id: subnet-0fcf8e0392f0910d1
-          roles:
-          - IngressController
-          - Cluster
+        - id: subnet-0fcf8e0392f0910d0 # public / us-east-2a
+          rolesOverride:
+          - IngressControllerLB
+          - ControlPlaneExternalLB
+        - id: subnet-0fcf8e0392f0910d1 # private / us-east-2a
+          rolesOverride:
+          - ControlPlaneInternalLB
+          - ClusterNode
         lbType: Classic
     [...]
     ```
-2. The OpenShift Installer populates the both the `default` IngressController and the `cluster` Ingress Config
-   manifests with the IngressController-role subnets and installs the cluster into the existing VPC:
+2. The OpenShift Installer uses the subnets in accordance to their specified roles. For IngressControllerLB subnets,
+   it populates the both the `default` IngressController and the `cluster` Ingress Config
+   manifests with them and installs the cluster into the existing VPC:
    ```yaml
    apiVersion: config.openshift.io/v1
    kind: Ingress
@@ -617,7 +691,7 @@ automatically discover the subnets for its IngressController's load balancer:
 
 1. Cluster admin creates an install-config with `platform.aws.subnetsConfig` specified
    with the subnet(s) while ensuring `platform.aws.subnetsConfig[].roles` is configured
-   with only `Cluster`:
+   with only `ClusterNode`:
     ```yaml
     apiVersion: v1
     baseDomain: devcluster.openshift.com
@@ -630,24 +704,63 @@ automatically discover the subnets for its IngressController's load balancer:
         subnetsConfig:
         - id: subnet-0fcf8e0392f0910d2
           roles:
-          - Cluster
+          - ClusterNode
         - id: subnet-0fcf8e0392f0910d3
           roles:
-          - Cluster
+          - ClusterNode
     [...]
     ```
-2. The OpenShift Installer installs the cluster into the VPC where the Cluster-role subnets exist, but does not
+2. The OpenShift Installer installs the cluster into the VPC where the ClusterNode subnets exist, but does not
    configure any specific subnets for the `default` IngressController or `cluster` Ingress Config manifests.
 3. When the `default` IngressController is created, the load balancer will automatically map to the appropriately
    tagged subnets in the VPC (see [AWS Subnet Discovery](#aws-subnet-discovery) for how subnets are discovered).
 
-#### Specifying Dedicated IngressController-role Subnets During Installation with a BYO VPC Workflow
+#### Specifying Dedicated Load Balancer Subnets During Installation with a BYO VPC Workflow
 
-Specifying dedicated IngressController subnets enables cluster admins to isolate
-IngressController subnets from the node subnets (i.e. Cluster-role subnets):
+Specifying dedicated IngressControllerLB or ControlPlaneLB subnets enables cluster admins to isolate
+their load balancer subnets from the node subnets (i.e. ClusterNode subnets). Additionally, the
+IngressControllerLB and ControlPlaneLB subnets can also be isolated from each other:
 
 1. Cluster admin creates an install-config with `platform.aws.subnetsConfig`, specifying
-   each subnet to have either the `IngressController` or `Cluster` role in `platform.aws.subnetsConfig.roles`, but
+   each subnet to have a single role (`IngressControllerLB`, `ControlPlaneExternalLB`, `ControlPlaneInternalLB`
+   or `ClusterNode`) in the `platform.aws.subnetsConfig.roles` field:
+    ```yaml
+    apiVersion: v1
+    baseDomain: devcluster.openshift.com
+    metadata:
+      name: my-cluster
+    [...]
+    platform:
+      aws:
+        region: us-east-2
+        subnetsConfig:
+        - id: subnet-0fcf8e0392f0910d4 # Private / AZ us-east-1a
+          roles:
+          - ClusterNode
+        - id: subnet-0fcf8e0392f0910d5 # Public / AZ us-east-1a
+          roles:
+          - IngressControllerLB
+        - id: subnet-0fcf8e0392f0910d6 # Public / AZ us-east-1a
+          roles:
+          - ControlPlaneExternalLB
+        - id: subnet-0fcf8e0392f0910d7 # Private / AZ us-east-1a
+          roles:
+          - ControlPlaneInternalLB
+        lbType: NLB
+    [...]
+    ```
+2. The OpenShift Installer populates the both the `default` IngressController and the `cluster` Ingress Config
+   manifests with the IngressControllerLB subnets and installs the cluster into the existing VPC.
+3. The `default` IngressController is configured with the dedicated subnet(s), and user-created
+   IngressControllers created on Day 2 will also default to using the dedicated subnets.
+
+#### Specifying Dedicated ControlPlaneLB Subnets During Installation with a BYO VPC Workflow
+
+Specifying dedicated ControlPlaneExternalLB and ControlPlaneInternalLB subnets enables cluster admins to isolate
+the ControlPlaneLB subnets from the node subnets (i.e. ClusterNode subnets):
+
+1. Cluster admin creates an install-config with `platform.aws.subnetsConfig`, specifying
+   each subnet to have either the `ControlPlaneExternalLB` or `ClusterNode` role in `platform.aws.subnetsConfig.roles`, but
    not both:
     ```yaml
     apiVersion: v1
@@ -661,15 +774,15 @@ IngressController subnets from the node subnets (i.e. Cluster-role subnets):
         subnetsConfig:
         - id: subnet-0fcf8e0392f0910d4 # AZ us-east-1a
           roles:
-          - Cluster
+          - ClusterNode
         - id: subnet-0fcf8e0392f0910d5 # AZ us-east-1a
           roles:
-          - IngressController
+          - IngressControllerLB
         lbType: NLB
     [...]
     ```
 2. The OpenShift Installer populates the both the `default` IngressController and the `cluster` Ingress Config
-   manifests with the IngressController-role subnets and installs the cluster into the existing VPC.
+   manifests with the IngressControllerLB subnets and installs the cluster into the existing VPC.
 3. The `default` IngressController is configured with the dedicated subnet(s), and user-created
    IngressControllers created on Day 2 will also default to using the dedicated subnets.
 
@@ -690,11 +803,11 @@ Ingress Config's subnets.
 
 #### Changing IngressController Load Balancer Type with Defaulting Subnets Workflow
 
-If a cluster admin specifies IngressController-role subnets in the install-config, and later changes the
+If a cluster admin specifies IngressControllerLB subnets in the install-config, and later changes the
 IngressController's load balancer type without providing specific subnets, the new load balancer will
 default to using the subnets defined in the Ingress Config:
 
-1. The cluster admin installs a cluster with IngressController-role subnets and a Classic load balancer for the
+1. The cluster admin installs a cluster with IngressControllerLB subnets and a Classic load balancer for the
    `default` IngressController:
     ```yaml
     apiVersion: v1
@@ -708,17 +821,17 @@ default to using the subnets defined in the Ingress Config:
         subnetsConfig:
         - id: subnet-0fcf8e0392f0910d0
           roles:
-          - IngressController
-          - Cluster
+          - IngressControllerLB
+          - ClusterNode
         - id: subnet-0fcf8e0392f0910d1
           roles:
-          - IngressController
-          - Cluster
+          - IngressControllerLB
+          - ClusterNode
         lbType: Classic
     [...]
     ```
 2. The OpenShift Installer populates the both the `default` IngressController and the `cluster` Ingress Config
-   manifests with the IngressController-role subnets and installs the cluster into the existing VPC. The
+   manifests with the IngressControllerLB subnets and installs the cluster into the existing VPC. The
    `default` IngressController only has subnets configured for `classicLoadBalancer`:
    ```yaml
    apiVersion: operator.openshift.io/v1
@@ -785,6 +898,83 @@ default to using the subnets defined in the Ingress Config:
 As a result, the new NLB type load balancer for the `default` IngressController receives the default subnets specified
 at install time.
 
+#### Specifying Dedicated ControlPlaneLB Subnets with BYO VPC during Installation Workflow
+
+A cluster-admin may prefer to explicitly set the subnets for  during installation (Day 1) rather than relying on [AWS Subnet Discovery](#aws-subnet-discovery):
+
+1. Cluster admin creates an install-config with `platform.aws.subnetsConfig` specified
+   with the subnet(s) while ensuring the `platform.aws.subnetsConfig[].roles` field is
+   configured with `IngressControllerLB` and `ClusterNode`:
+    ```yaml
+    apiVersion: v1
+    baseDomain: devcluster.openshift.com
+    metadata:
+      name: my-cluster
+    [...]
+    platform:
+      aws:
+        region: us-east-2
+        subnetsConfig:
+        - id: subnet-0fcf8e0392f0910d0
+          roles:
+          - IngressControllerLB
+          - ClusterNode
+        - id: subnet-0fcf8e0392f0910d1
+          roles:
+          - IngressControllerLB
+          - ClusterNode
+        lbType: Classic
+    [...]
+    ```
+2. The OpenShift Installer populates the both the `default` IngressController and the `cluster` Ingress Config
+   manifests with the IngressControllerLB subnets and installs the cluster into the existing VPC:
+   ```yaml
+   apiVersion: config.openshift.io/v1
+   kind: Ingress
+   metadata:
+     name: cluster
+   spec:
+     [...]
+     loadBalancer:
+       platform:
+         aws:
+           classicLoadBalancer:
+             subnets:
+               ids:
+               - subnet-0fcf8e0392f0910d0
+               - subnet-0fcf8e0392f0910d1
+           networkLoadBalancer:
+             subnets:
+               ids:
+               - subnet-0fcf8e0392f0910d0
+               - subnet-0fcf8e0392f0910d1
+   [...]
+   ---
+   apiVersion: operator.openshift.io/v1
+   kind: IngressController
+   metadata:
+     name: default
+     namespace: openshift-ingress-operator
+   spec:
+     [...]
+     endpointPublishingStrategy:
+       type: LoadBalancerService
+       loadBalancer:
+         scope: External
+         providerParameters:
+           type: AWS
+           aws:
+             type: Classic
+             classicLoadBalancer:
+               subnets:
+                 ids:
+                 - subnet-0fcf8e0392f0910d0
+                 - subnet-0fcf8e0392f0910d1
+     [...]
+   ```
+3. The `default` IngressController is configured with the specified subnets, and user-created
+   IngressControllers created on Day 2 will default to using the subnets specified in the Ingress Config.
+
 ### API Extensions
 
 This proposal doesn't add any API extensions other than the new field proposed in
@@ -808,8 +998,8 @@ deployments or MicroShift.
 
 ### Risks and Mitigations
 
-- Risk: Using public IngressController-role subnets for private clusters.
-  - We will reject private cluster installations using public IngressController-role subnets (see
+- Risk: Using public IngressControllerLB subnets for private clusters.
+  - We will reject private cluster installations using public IngressControllerLB subnets (see
     [Consistent Cluster Scope with IngressController-Role Subnets Validation](#consistent-cluster-scope-with-ingresscontroller-role-subnets-validation))
   - For private cluster installations using subnet discovery, public subnets will be excluded from the 
     `default` IngressControllers, provided the subnets are correctly tagged.
@@ -830,11 +1020,12 @@ deployments or MicroShift.
 
 ## Open Questions
 
-- Q: Should the install-config design assume all IngressController-role subnets are Cluster-role subnets too?
+- Q: Should the install-config design assume all IngressControllerLB subnets are ClusterNode  subnets too?
   - A: No, we must support dedicated IngressController subnet use cases.
 - Q: Should the Ingress Config use a feature gate different from the `IngressControllerLBSubnetsAWS` feature gate
   introduced in [NE-705](https://issues.redhat.com/browse/NE-705)?
   - `IngressControllerLBSubnetsAWS` is already enabled by default.
+- Q: Bootstrap node using public subnet?
 
 ## Test Plan
 
@@ -900,9 +1091,9 @@ N/A.
 
 ## Support Procedures
 
-### Ingress Not Functional After Installing using IngressController-role Subnets
+### Ingress Not Functional After Installing using IngressControllerLB Subnets
 
-If the cluster installation with specified IngressController-role subnets was successful, but ingress is not working,
+If the cluster installation with specified IngressControllerLB subnets was successful, but ingress is not working,
 check the AWS CCM logs of the leader CCM pod for errors in provisioning the load balancer:
 
 ```bash
@@ -963,7 +1154,7 @@ However, this alternative has been deemed insufficient because:
 
 ### Override Subnet Discovery
 
-One possible design for the install-config API is to require at least one IngressController-role subnet for all
+One possible design for the install-config API is to require at least one IngressControllerLB subnet for all
 new installations, effectively overriding AWS subnet discovery. This approach would bypass subnet discovery
 entirely, as the default subnets would always be explicitly defined in the Ingress Config object.
 
@@ -993,7 +1184,7 @@ type Platform struct {
 
 type SubnetConfig struct {
     // clusterSubnets specifies subnets that will be used as
-    // Cluster-role subnets.
+    // ClusterNode role subnets.
     //
     // +required
     // +listType=atomic
@@ -1001,7 +1192,7 @@ type SubnetConfig struct {
     ClusterSubnets []AWSSubnetID `json:"clusterSubnets,omitempty"`
 
     // ingressControllerSubnets specifies subnets that will be used as
-    // IngressController-role subnets.
+    // IngressControllerLB subnets.
     //
     // +optional
     // +listType=atomic
