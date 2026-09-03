@@ -46,11 +46,13 @@ resources.
 
 ## Motivation
 
-OpenShift ships Gateway API via OSSM, which supports customization of
-the backing Service and proxy Deployment through implementation-specific
-mechanisms (GatewayClass defaults ConfigMap, alpha annotations). These
-mechanisms are undocumented, unsupported for end users, and tied to
-Istio internals. There is no OpenShift API that:
+OpenShift currently has no supported way to customize how a Gateway API
+implementation provisions the Kubernetes Service, proxy Deployment, or
+proxy configuration for a GatewayClass. OpenShift ships Gateway API via
+OSSM, which supports customization through implementation-specific
+mechanisms (GatewayClass defaults ConfigMap, alpha annotations), but
+these are undocumented, unsupported for end users, and tied to Istio
+internals. There is no OpenShift API that:
 
 - Provides a stable, validated interface for Gateway infrastructure
   customization
