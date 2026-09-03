@@ -101,21 +101,17 @@ expose services only within my cloud provider's private network.
 
 ### Goals
 
-- Introduce a `GatewayParameters` CRD that a `GatewayClass` references
-  via `spec.parametersRef` to configure its service topology.
-- CIO reconciles `GatewayParameters` → OSSM GatewayClass defaults
-  ConfigMap (labeled `gateway.istio.io/defaults-for-class`), translating
-  the OpenShift API into the implementation-specific ConfigMap format.
-- Implement `endpointPublishingStrategy` for service type
-  (LoadBalancer/NodePort/ClusterIP) and `externalTrafficPolicy`
-  (Local/Cluster).
-- CIO derives platform-specific service annotations automatically from
-  cluster infrastructure, as it does for IngressControllers.
-- CIO manages DNS for GatewayClasses with LoadBalancer service type;
-  not for ClusterIP or NodePort.
-- The existing `openshift-default` GatewayClass is unchanged.
-- Design the CRD for future extension (resources, nodePlacement) without
-  breaking API changes.
+- Provide a supported, stable OpenShift API for customizing the service
+  topology of a GatewayClass (LoadBalancer external/internal, NodePort,
+  ClusterIP) and endpoint traffic policy.
+- Platform-specific service configuration (cloud LB annotations, OVN
+  settings) is derived automatically — administrators express intent,
+  not platform details.
+- The API is implementation-agnostic and upgrade-safe: customizations
+  survive Gateway API implementation changes without user intervention.
+- The `openshift-default` GatewayClass is unchanged.
+- Establish an extensible API foundation for follow-on customization
+  (resource requests, node placement) without breaking changes.
 
 ### Non-Goals
 
