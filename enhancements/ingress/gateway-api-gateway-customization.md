@@ -75,6 +75,17 @@ Users who need these configurations must use the Istio ClusterIP alpha
 annotation or manually patch the Service — both fragile approaches that
 are overwritten on reconciliation and unsupported for production use.
 
+In an ideal world, all Gateway infrastructure customization would be
+standardized upstream in the Gateway API specification. The upstream
+community is actively working toward some of these use cases, and where
+upstream standards mature, OpenShift will align with them. However, some
+customizations are unlikely to ever be standardized upstream — they are
+platform-specific, operational concerns that implementations intentionally
+leave to operators. For both categories, users need a supported solution
+today. This EP provides a downstream OpenShift API that bridges the gap,
+designed to minimize migration cost where upstream standards eventually
+emerge.
+
 ### User Stories
 
 #### Story 1: ClusterIP Gateway on Bare Metal
@@ -493,14 +504,37 @@ Creating fixed GatewayClasses (`openshift-external`, `openshift-internal`,
 for each new configuration combination and creates a permanent VAP
 allowlist maintenance burden.
 
-### Istio ClusterIP Alpha Annotation
+### Wait for Upstream Standardization
+
+For ClusterIP specifically, [GEP-5093 (Routability)](https://gateway-api.sigs.k8s.io/geps/gep-5093/)
+proposes a standard upstream mechanism for configuring service type in
+the Gateway API spec. If adopted and GA'd upstream, OpenShift could
+align with it rather than maintaining a downstream API.
+
+This alternative was rejected for the near term because GEP-5093 is in
+early stages, upstream GA is likely 3–5 years away, and OpenShift
+adoption would follow after that. Users need a supported solution now.
+This EP is designed so that if a future upstream standard for ClusterIP
+emerges, the migration path is a GatewayClass or GatewayParameters change
+rather than application-level changes. Other customizations covered by
+this EP (ETP, platform annotation derivation) are unlikely to ever be
+standardized upstream.
+
+### Istio ClusterIP Alpha Annotation as Interim Solution
 
 The annotation `networking.istio.io/service-type: ClusterIP` on a
-`Gateway` resource can configure a ClusterIP service today. This is
-rejected as a supported path because it is an undocumented private API
-that can change or be removed at any OSSM version, gives CIO no
-visibility into the configured service type, and does not compose with
-ETP configuration.
+`Gateway` resource can configure a ClusterIP service today. An interim
+approach of officially supporting this annotation until GEP-5093 reaches
+GA was considered.
+
+This was rejected because: the annotation is an undocumented private
+Istio API that can change or be removed at any OSSM version without
+notice; it gives CIO no visibility into the configured service type and
+therefore cannot integrate with DNS management, condition reporting, or
+future platform annotation derivation; and it does not compose with ETP
+configuration. Supporting it officially would set a precedent of exposing
+implementation internals as a supported API surface, which contradicts
+the goal of an implementation-agnostic OpenShift configuration layer.
 
 ## Open Questions
 
