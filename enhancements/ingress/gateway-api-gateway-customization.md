@@ -11,7 +11,7 @@ approvers:
 api-approvers:
   - TBD
 creation-date: 2026-09-01
-last-updated: 2026-09-01
+last-updated: 2026-09-03
 status: provisional
 tracking-link:
   - https://redhat.atlassian.net/browse/NE-2698
@@ -26,468 +26,298 @@ superseded-by: []
 
 ## Summary
 
-This enhancement extends the `operator.openshift.io/v1alpha1` `Ingress`
-singleton (introduced by the Gateway API CRD management mode
-enhancement) with a `spec.gatewayAPI.customGatewayClasses` field that
-allows cluster administrators to declaratively define user-managed
-GatewayClasses with customized service topology and proxy resource
-configuration. For each entry, the Cluster Ingress Operator (CIO)
-creates a GatewayClass resource and a corresponding GatewayClass
-defaults ConfigMap that the Gateway API implementation uses when
-provisioning the Gateway's backing Service and proxy deployment.
+This enhancement introduces a new `GatewayParameters` CRD in the
+`operator.openshift.io` API group. A `GatewayClass` references a
+`GatewayParameters` instance via `spec.parametersRef`, and the Cluster
+Ingress Operator (CIO) reconciles it into an OSSM GatewayClass defaults
+ConfigMap. This provides a first-class, implementation-agnostic API for
+customizing how Gateway API implementations provision the backing
+Kubernetes Service and proxy deployment for a GatewayClass.
 
-This replaces a previous proposal that created a fixed set of
-hardcoded GatewayClasses (`openshift-external`, `openshift-internal`,
-`openshift-clusterip`). The `customGatewayClasses` approach is more
-flexible, supports NodePort services and resource customization, and
-does not require code changes to support new configurations.
+This EP implements two use cases: ClusterIP service type and
+`externalTrafficPolicy: Local`. The `GatewayParameters` CRD is designed
+to be extended with additional fields (resource requests, node
+placement) in follow-on work without API changes to the GatewayClass
+or Gateway resources.
 
 ## Motivation
 
-When a user creates a Gateway using the `openshift-default`
-GatewayClass, the Gateway API implementation always provisions an
-external LoadBalancer service. There is currently no supported,
-declarative way to:
+When a user creates a Gateway using the `openshift-default` GatewayClass,
+the Gateway API implementation always provisions an external LoadBalancer
+service. There is currently no supported, declarative way to:
 
-- Provision a Gateway backed by an internal LoadBalancer (for
-  traffic that should not be publicly exposed)
-- Provision a Gateway backed by a ClusterIP service (for cluster-
-  internal traffic, or to front with an OCP Route on bare-metal
-  without a hardware load balancer)
-- Provision a Gateway backed by a NodePort service (for bring-your-
-  own-load-balancer topologies on bare-metal or on-premises clusters)
-- Configure `externalTrafficPolicy` to preserve source IP and avoid
-  cross-zone hops in stretched or zone-aware cluster topologies
-- Tune resource requests and limits for the gateway proxy containers
+- Use a ClusterIP service for cluster-internal traffic or to front with
+  an OCP Route on bare-metal without a hardware load balancer
+- Configure `externalTrafficPolicy: Local` to preserve source IP and
+  avoid cross-zone hops in zone-aware or BGP-based cluster topologies
 
-Users who need these configurations today must either manually patch
-the Service after creation (fragile, unsupported), use a private
-Gateway API infrastructure field (unsupported, private API), or open
-a support exception. All three workarounds are unsuitable for
-production use.
+Users who need these configurations today must use the Istio ClusterIP
+alpha annotation or manually patch the Service after creation — both
+unsupported, fragile approaches that break on reconciliation or upgrade.
 
 ### User Stories
 
-#### Story 1: Internal LoadBalancer Gateway
+#### Story 1: ClusterIP Gateway on Bare Metal
+
+As a cluster administrator running on bare metal without a hardware
+load balancer, I want to create a GatewayClass that provisions Gateways
+with a ClusterIP service so that I can front the Gateway with an OCP
+Route using the existing HAProxy ingress infrastructure.
+
+#### Story 2: Zone-Aware External Gateway with ETP Local
+
+As a cluster administrator running a cluster across multiple
+availability zones with BGP-based networking, I want to configure
+`externalTrafficPolicy: Local` on my GatewayClass so that traffic
+arriving in a given zone is served by the proxy pod in that same zone,
+avoiding cross-zone hops and preserving source IP.
+
+#### Story 3: Internal LoadBalancer Gateway
 
 As a cluster administrator, I want to create a GatewayClass that
 provisions Gateways with an internal LoadBalancer service, including
-the platform-specific internal annotations that CIO already applies
-to internal IngressControllers, so that I can expose services only
-within my cloud provider's private network without manual patching.
-
-#### Story 2: ClusterIP Gateway on Bare Metal
-
-As a cluster administrator running on bare metal without a hardware
-load balancer, I want to create a GatewayClass that provisions
-Gateways with a ClusterIP service so that I can front the Gateway
-with an OCP Route, reusing the existing HAProxy-based ingress
-infrastructure without introducing additional infrastructure
-dependencies.
-
-#### Story 3: NodePort Gateway with Bring-Your-Own Load Balancer
-
-As a cluster administrator on an on-premises cluster, I want to
-create a GatewayClass that provisions Gateways with a NodePort
-service so that I can integrate with my existing hardware load
-balancer without requiring a cloud provider or MetalLB.
-
-#### Story 4: Zone-Aware External Gateway
-
-As a cluster administrator running a cluster stretched across
-multiple availability zones with BGP-based networking, I want to
-configure `externalTrafficPolicy: Local` on my external Gateway
-so that traffic arriving in a given zone is served by the Envoy
-pod in that same zone, avoiding cross-zone hops and preserving
-source IP.
-
-#### Story 5: Proxy Resource Tuning
-
-As a platform engineer managing production Gateway deployments,
-I want to configure resource requests and limits for the gateway
-proxy containers so that I can right-size the Envoy proxy deployment
-for my workload's traffic volume without relying on implementation
-defaults.
-
-#### Story 6: Operations at Scale
-
-As a platform engineer managing multiple clusters, I want Gateway
-customization to be declarative and managed by CIO so that I can
-rely on consistent service configurations across clusters, monitor
-GatewayClass provisioning health through existing operator conditions,
-and not perform manual configuration steps after cluster upgrade.
+the correct platform-specific internal annotations, so that I can
+expose services only within my cloud provider's private network.
 
 ### Goals
 
-- Allow cluster administrators to define user-managed GatewayClasses
-  with configurable service topology (LoadBalancer external/internal,
-  NodePort, ClusterIP) via the `Ingress` operator singleton API.
-- Allow configuration of `externalTrafficPolicy` per GatewayClass for
-  LoadBalancer and NodePort service types.
-- Allow configuration of proxy container resource requests and limits
-  per GatewayClass.
-- CIO derives platform-specific service annotations (cloud provider
-  LB annotations, OVN local-with-fallback) automatically from the
+- Introduce a `GatewayParameters` CRD that a `GatewayClass` references
+  via `spec.parametersRef` to configure its service topology.
+- CIO reconciles `GatewayParameters` → OSSM GatewayClass defaults
+  ConfigMap (labeled `gateway.istio.io/defaults-for-class`), translating
+  the OpenShift API into the implementation-specific ConfigMap format.
+- Implement `endpointPublishingStrategy` for service type
+  (LoadBalancer/NodePort/ClusterIP) and `externalTrafficPolicy`
+  (Local/Cluster).
+- CIO derives platform-specific service annotations automatically from
   cluster infrastructure, as it does for IngressControllers.
-- CIO manages DNS for GatewayClasses with LoadBalancer service types,
-  and explicitly does not manage DNS for ClusterIP or NodePort types.
-- Define a simplified ValidatingAdmissionPolicy that reserves the
-  `openshift-` GatewayClass name prefix for GatewayClasses using the
-  OpenShift controller name, without a hardcoded name allowlist.
-- The existing `openshift-default` GatewayClass behavior is
-  unchanged.
-- Support backporting to prior OCP releases that include the required
-  Gateway API implementation version with GatewayClass defaults
-  ConfigMap support.
+- CIO manages DNS for GatewayClasses with LoadBalancer service type;
+  not for ClusterIP or NodePort.
+- The existing `openshift-default` GatewayClass is unchanged.
+- Design the CRD for future extension (resources, nodePlacement) without
+  breaking API changes.
 
 ### Non-Goals
 
-- Customizing the `openshift-default` GatewayClass. It continues to
-  provision an external LoadBalancer with platform defaults.
-- Exposing arbitrary Service annotations in the API. Users can
-  annotate Gateway resources directly; the Gateway API implementation
-  propagates annotations to the Service.
-- Per-Gateway resource overrides. `customGatewayClasses` configures
-  class-level defaults applied to all Gateways referencing the class.
-- Gateway API implementation configuration (logging format, Istio
-  control plane settings). These are managed at the implementation
-  level, not per GatewayClass.
-- HPA configuration (deferred to a follow-up).
-- Node placement configuration (deferred to a follow-up).
-- `trafficDistribution` field on the Service. Analysis shows it is
-  effectively a no-op for the primary use cases: when
-  `externalTrafficPolicy: Local` is set, it is superseded; when not
-  set, it only affects in-cluster ClusterIP traffic to the Gateway,
-  which is not a typical access pattern.
+- Customizing the `openshift-default` GatewayClass.
+- Exposing the OSSM GatewayClass defaults ConfigMap (`gateway.istio.io/defaults-for-class`)
+  as a supported API for end users. It is an implementation detail owned
+  and managed exclusively by CIO.
+- Using or supporting the Istio ClusterIP alpha annotation
+  (`networking.istio.io/service-type`) as a supported mechanism for
+  service type customization. This annotation is an unsupported private
+  API and is superseded by this enhancement.
+- Per-Gateway resource overrides. `GatewayParameters` configures
+  class-level defaults shared by all Gateways referencing the class.
+- Gateway API implementation configuration (logging, control plane
+  settings).
+- `trafficDistribution` on the Service. When `externalTrafficPolicy: Local`
+  is set it is superseded; for ClusterIP traffic to the Gateway it is
+  a no-op for the primary use cases.
+- HPA configuration (deferred to a follow-on).
+- Node placement and tolerations (deferred to a follow-on).
 
 ## Proposal
 
-The `GatewayAPIIngressConfig` struct in the
-`operator.openshift.io/v1alpha1` `Ingress` resource is extended with
-a `customGatewayClasses` field. Each entry declares a GatewayClass
-that CIO will create and manage, along with the service topology
-and proxy resource configuration for Gateways that reference it.
+A new cluster-scoped CRD `GatewayParameters`
+(`operator.openshift.io/v1alpha1`) is introduced. A cluster
+administrator creates a `GatewayClass` with `spec.parametersRef`
+pointing to a `GatewayParameters` instance, and creates the
+`GatewayParameters` CR to configure the desired service topology.
 
-For each entry, CIO:
+CIO watches GatewayClasses whose `spec.controllerName` matches the
+OpenShift controller name. For any such GatewayClass with a
+`spec.parametersRef` pointing to a `GatewayParameters` CR, CIO:
 
-1. Creates or updates a `gateway.networking.k8s.io/v1` `GatewayClass`
-   resource with `controllerName:
-   openshift.io/gateway-controller/v1`.
-2. Builds a GatewayClass defaults ConfigMap and passes it to the
-   sail-operator library (the same mechanism CIO uses for HPA
-   provisioning), which creates or updates the ConfigMap. The
-   ConfigMap is consumed by the Gateway API implementation to set
-   service type, platform-specific annotations, and
-   `externalTrafficPolicy` on Gateways referencing this class.
-3. Manages DNS for the Gateway's listeners when `serviceType` is
-   `LoadBalancerService` (same as `openshift-default`).
+1. Reads the `GatewayParameters` CR.
+2. Derives platform-specific service annotations from the cluster's
+   `infrastructure.config.openshift.io/cluster` resource.
+3. Creates or updates a ConfigMap in the `openshift-ingress` namespace
+   with the label `gateway.istio.io/defaults-for-class: <gatewayclass-name>`.
+   OSSM reads this ConfigMap to apply service type, annotations, and ETP
+   to all Gateways referencing the class.
+4. Manages DNS for `LoadBalancerService` type only.
 
-Platform-specific service annotations (AWS NLB, internal LB
-annotations per cloud provider, OVN `local-with-fallback`) are
-derived automatically from the cluster's infrastructure platform,
-reusing the existing IngressController annotation-derivation logic.
-Users do not need to specify platform annotations explicitly.
-
-The existing hardcoded `openshift-default` GatewayClass remains
-unchanged. `customGatewayClasses` entries supplement it rather than
-replace it.
+CIO never mutates the user's `Gateway` or `GatewayClass` resources.
 
 ### Workflow Description
 
-**cluster administrator** is a human user responsible for managing
-the cluster and Gateway infrastructure.
+#### ClusterIP Gateway (bare-metal / OCP Route topology)
 
-**application developer** is a human user responsible for deploying
-applications and creating HTTPRoutes.
-
-#### Creating an Internal LoadBalancer Gateway (example workflow)
-
-1. The cluster administrator edits the `Ingress/cluster` singleton:
+1. The cluster administrator creates a `GatewayParameters` CR:
 
    ```yaml
    apiVersion: operator.openshift.io/v1alpha1
-   kind: Ingress
+   kind: GatewayParameters
    metadata:
-     name: cluster
+     name: clusterip-params
    spec:
-     gatewayAPI:
-       customGatewayClasses:
-       - name: openshift-internal
-         endpointPublishingStrategy:
-           type: LoadBalancerService
-           loadBalancer:
-             scope: Internal
-             endpointTrafficPolicy: Local
+     endpointPublishingStrategy:
+       type: ClusterIPService
    ```
 
-2. CIO detects the new entry and creates the `openshift-internal`
-   GatewayClass resource with `controllerName:
-   openshift.io/gateway-controller/v1`.
-3. CIO builds the GatewayClass defaults ConfigMap with:
-   - `service.type: LoadBalancer`
-   - Platform internal LB annotation (e.g.,
-     `service.beta.kubernetes.io/aws-load-balancer-internal: "true"`
-     on AWS)
-   - `service.externalTrafficPolicy: Local`
-   - OVN `local-with-fallback` annotation (where applicable)
-4. CIO passes the ConfigMap configuration to the sail-operator
-   library, which creates `openshift-internal-gwc-params` ConfigMap
-   in the `openshift-ingress` namespace.
-5. The cluster administrator creates a Gateway:
+2. The cluster administrator creates a `GatewayClass` referencing it:
 
    ```yaml
    apiVersion: gateway.networking.k8s.io/v1
-   kind: Gateway
+   kind: GatewayClass
    metadata:
-     name: my-internal-gateway
-     namespace: my-namespace
+     name: openshift-clusterip
    spec:
-     gatewayClassName: openshift-internal
-     listeners:
-     - name: https
-       port: 443
-       protocol: HTTPS
+     controllerName: openshift.io/gateway-controller/v1
+     parametersRef:
+       group: operator.openshift.io
+       kind: GatewayParameters
+       name: clusterip-params
    ```
 
-6. The Gateway API implementation provisions an Envoy proxy Deployment
-   and an internal LoadBalancer Service using the defaults from the
-   ConfigMap.
-7. CIO manages DNS for the Gateway's listeners.
-8. The application developer creates HTTPRoutes attached to the
-   Gateway.
-
-#### Creating a ClusterIP Gateway (bare-metal / OCP Route topology)
-
-1. The cluster administrator adds a ClusterIP entry:
+3. CIO creates a ConfigMap in `openshift-ingress`:
 
    ```yaml
-   spec:
-     gatewayAPI:
-       customGatewayClasses:
-       - name: openshift-clusterip
-         endpointPublishingStrategy:
-           type: ClusterIPService
+   metadata:
+     labels:
+       gateway.istio.io/defaults-for-class: openshift-clusterip
+   data:
+     service: |
+       spec:
+         type: ClusterIP
    ```
 
-2. CIO creates the GatewayClass and a ConfigMap with
-   `service.type: ClusterIP`.
-3. The cluster administrator creates a Gateway referencing
-   `openshift-clusterip`.
-4. The Gateway API implementation provisions an Envoy proxy Deployment
-   and a ClusterIP Service. No cloud LB is created.
-5. CIO does **not** provision DNS for ClusterIP gateways.
-6. The cluster administrator creates an OCP Route pointing at the
+4. The cluster administrator creates a Gateway referencing
+   `openshift-clusterip`. OSSM provisions an Envoy Deployment and a
+   ClusterIP Service. No cloud LB is created, no DNS is managed.
+
+5. The cluster administrator creates an OCP Route pointing at the
    ClusterIP Service to expose the Gateway externally via HAProxy.
 
-#### Creating a NodePort Gateway (bring-your-own load balancer)
+#### Zone-Aware LoadBalancer with ETP Local
 
-1. The cluster administrator adds a NodePort entry:
+1. The cluster administrator creates a `GatewayParameters` CR:
 
    ```yaml
+   apiVersion: operator.openshift.io/v1alpha1
+   kind: GatewayParameters
+   metadata:
+     name: external-zone-aware
    spec:
-     gatewayAPI:
-       customGatewayClasses:
-       - name: openshift-nodeport
-         endpointPublishingStrategy:
-           type: NodePortService
-           nodePort:
-             endpointTrafficPolicy: Local
+     endpointPublishingStrategy:
+       type: LoadBalancerService
+       loadBalancer:
+         scope: External
+         endpointTrafficPolicy: Local
    ```
 
-2. CIO creates the GatewayClass and a ConfigMap with
-   `service.type: NodePort` and
-   `service.externalTrafficPolicy: Local`.
-3. The cluster administrator creates a Gateway referencing
-   `openshift-nodeport`.
-4. The Gateway API implementation provisions a NodePort Service.
-   The `spec.healthCheckNodePort` field is set automatically by
-   Kubernetes when `externalTrafficPolicy: Local`.
-5. CIO does **not** provision DNS.
-6. The cluster administrator configures their external load balancer
-   to use `spec.healthCheckNodePort` for health checking, ensuring
-   traffic is only sent to nodes with a local Envoy pod.
+2. The cluster administrator creates a GatewayClass referencing it
+   with `spec.parametersRef` (same pattern as above).
 
-```mermaid
-sequenceDiagram
-    participant Admin as Cluster Admin
-    participant CIO as cluster-ingress-operator
-    participant Sail as sail-operator library
-    participant Impl as Gateway API implementation
-    participant Cloud as Cloud / Network
+3. CIO creates the ConfigMap with `service.type: LoadBalancer`,
+   the platform external LB annotation, `externalTrafficPolicy: Local`,
+   and the OVN `local-with-fallback` annotation where applicable.
 
-    Admin->>CIO: Edit Ingress/cluster (add customGatewayClasses entry)
-    CIO->>Impl: Create GatewayClass resource
-    CIO->>Sail: Pass service config as json.RawMessage
-    Sail->>Sail: Create GatewayClass defaults ConfigMap
-    Note over Sail: type, scope, ETP,<br/>platform annotations
-
-    Admin->>Impl: Create Gateway (references custom class)
-    Impl->>Impl: Deploy proxy Deployment
-    Impl->>Cloud: Create Service (per ConfigMap defaults)
-    CIO->>Cloud: Create DNS records (LB types only)
-
-    Note over Admin,Cloud: No DNS for ClusterIP or NodePort types
-```
+4. Gateways referencing this class get a LoadBalancer Service with ETP
+   Local. CIO manages DNS.
 
 ### API Extensions
 
-This enhancement extends the existing
-`operator.openshift.io/v1alpha1` `Ingress` CRD. It does not
-introduce new CRD types.
-
-#### New fields on `GatewayAPIIngressConfig`
+#### `GatewayParameters` CRD
 
 ```go
-type GatewayAPIIngressConfig struct {
-    // managementMode (existing, unchanged)
-    ManagementMode GatewayAPIManagementMode `json:"managementMode,omitempty"`
+// GatewayParameters configures the infrastructure provisioned by the
+// OpenShift ingress operator for a GatewayClass that references it via
+// spec.parametersRef.
+//
+// This CRD is designed to be extended to support Gateway-level
+// customization in a future release, pending upstream plumbing support
+// for non-mutating per-Gateway configuration injection.
+//
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:subresource:status
+// +openshift:enable:FeatureGate=GatewayClassParameters
+type GatewayParameters struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
 
-    // customGatewayClasses defines a list of GatewayClasses that CIO
-    // creates and manages. For each entry, CIO creates a GatewayClass
-    // resource and a GatewayClass defaults ConfigMap that the Gateway
-    // API implementation uses when provisioning Gateways of that class.
-    //
-    // GatewayClass-level settings are defaults applied to all Gateways
-    // referencing the class. Individual Gateway instances cannot
-    // override class-level settings.
-    //
-    // +optional
-    // +listType=map
-    // +listMapKey=name
-    // +kubebuilder:validation:MaxItems=16
-    CustomGatewayClasses []CustomGatewayClassConfig `json:"customGatewayClasses,omitempty"`
+    Spec   GatewayParametersSpec   `json:"spec"`
+    Status GatewayParametersStatus `json:"status,omitempty"`
 }
-```
 
-#### `CustomGatewayClassConfig`
-
-```go
-// CustomGatewayClassConfig defines a user-managed GatewayClass and
-// its associated configuration.
-type CustomGatewayClassConfig struct {
-    // name is the name of the GatewayClass to create. Must use the
-    // "openshift-" prefix. The name "openshift-default" is reserved
-    // and may not be used here.
-    //
-    // +required
-    // +kubebuilder:validation:MinLength=12
-    // +kubebuilder:validation:Pattern=`^openshift-[a-z0-9]([a-z0-9\-]*[a-z0-9])?$`
-    // +kubebuilder:validation:XValidation:rule="self != 'openshift-default'",message="openshift-default is reserved"
-    Name string `json:"name"`
-
-    // endpointPublishingStrategy defines how the Gateway's endpoints
-    // are published to the network. When omitted, defaults to an
-    // external LoadBalancer with platform defaults.
+type GatewayParametersSpec struct {
+    // endpointPublishingStrategy defines how the Gateway's backing
+    // Service is provisioned. When omitted, defaults to an external
+    // LoadBalancer with platform defaults (matching openshift-default
+    // behavior).
     //
     // +optional
     EndpointPublishingStrategy *GatewayEndpointPublishingStrategy `json:"endpointPublishingStrategy,omitempty"`
 
-    // resources configures resource requests and limits for the
-    // gateway proxy containers. When omitted, the Gateway API
-    // implementation's defaults apply.
-    //
-    // +optional
-    Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+    // Future fields (not in this EP):
+    //   resources     *corev1.ResourceRequirements
+    //   nodePlacement *NodePlacement
 }
 ```
 
 #### `GatewayEndpointPublishingStrategy`
 
 ```go
-// GatewayEndpointPublishingStrategy defines how a Gateway's endpoints
-// are published. It is a discriminated union on Type.
-//
 // +union
 // +kubebuilder:validation:XValidation:rule="self.type != 'LoadBalancerService' || has(self.loadBalancer)",message="loadBalancer is required when type is LoadBalancerService"
 // +kubebuilder:validation:XValidation:rule="self.type == 'LoadBalancerService' || !has(self.loadBalancer)",message="loadBalancer is only valid when type is LoadBalancerService"
 // +kubebuilder:validation:XValidation:rule="self.type == 'NodePortService' || !has(self.nodePort)",message="nodePort is only valid when type is NodePortService"
 type GatewayEndpointPublishingStrategy struct {
-    // type is the publishing strategy to use.
+    // type is the publishing strategy.
     //
-    // LoadBalancerService provisions a cloud or hardware LoadBalancer
-    // Service in front of the gateway proxy. CIO applies
-    // platform-specific annotations and manages DNS automatically.
+    // LoadBalancerService: provisions a cloud or hardware LoadBalancer
+    // Service. CIO applies platform-specific annotations and manages DNS.
     //
-    // NodePortService provisions a Kubernetes NodePort Service.
-    // No DNS is managed by CIO. The cluster administrator is
-    // responsible for configuring an external load balancer and, when
-    // endpointTrafficPolicy is Local, directing it to use the
-    // Service's healthCheckNodePort for health checking.
+    // NodePortService: provisions a NodePort Service. No DNS is managed.
+    // The administrator is responsible for the external load balancer.
     //
-    // ClusterIPService provisions a ClusterIP Service. The gateway
-    // is accessible only within the cluster. No DNS is managed by
-    // CIO. Useful for fronting with an OCP Route on bare-metal
-    // clusters without a hardware or software load balancer.
+    // ClusterIPService: provisions a ClusterIP Service accessible only
+    // within the cluster. No DNS is managed. Useful for fronting with
+    // an OCP Route on bare-metal clusters.
     //
     // +unionDiscriminator
     // +required
     // +kubebuilder:validation:Enum=LoadBalancerService;NodePortService;ClusterIPService
     Type GatewayEndpointPublishingStrategyType `json:"type"`
 
-    // loadBalancer holds parameters for the load balancer.
-    // Present only when type is LoadBalancerService.
-    //
+    // loadBalancer holds parameters for the LoadBalancer service type.
     // +optional
     LoadBalancer *GatewayLoadBalancerStrategy `json:"loadBalancer,omitempty"`
 
-    // nodePort holds parameters for the NodePort service.
-    // Present only when type is NodePortService.
-    //
+    // nodePort holds parameters for the NodePort service type.
     // +optional
     NodePort *GatewayNodePortStrategy `json:"nodePort,omitempty"`
 }
 
-// GatewayEndpointPublishingStrategyType is the publishing strategy
-// for a Gateway.
 type GatewayEndpointPublishingStrategyType string
 
 const (
-    // GatewayStrategyLoadBalancerService provisions a LoadBalancer
-    // Service and manages DNS.
     GatewayStrategyLoadBalancerService GatewayEndpointPublishingStrategyType = "LoadBalancerService"
-
-    // GatewayStrategyNodePortService provisions a NodePort Service.
-    // No DNS is managed by CIO.
-    GatewayStrategyNodePortService GatewayEndpointPublishingStrategyType = "NodePortService"
-
-    // GatewayStrategyClusterIPService provisions a ClusterIP Service.
-    // No DNS is managed by CIO.
-    GatewayStrategyClusterIPService GatewayEndpointPublishingStrategyType = "ClusterIPService"
+    GatewayStrategyNodePortService     GatewayEndpointPublishingStrategyType = "NodePortService"
+    GatewayStrategyClusterIPService    GatewayEndpointPublishingStrategyType = "ClusterIPService"
 )
 
-// GatewayLoadBalancerStrategy holds parameters for a LoadBalancer-
-// backed GatewayClass.
 type GatewayLoadBalancerStrategy struct {
-    // scope indicates whether the load balancer is exposed
-    // externally or only within the cloud provider's private
-    // network.
-    //
-    // External provisions a public-facing load balancer with
-    // platform-specific external annotations.
-    //
-    // Internal provisions an internal load balancer with
-    // platform-specific internal annotations (e.g.,
-    // service.beta.kubernetes.io/aws-load-balancer-internal).
+    // scope is External or Internal. External provisions a public-facing
+    // LB; Internal provisions a private LB with platform-specific internal
+    // annotations (e.g. service.beta.kubernetes.io/aws-load-balancer-internal).
     //
     // +required
     Scope LoadBalancerScope `json:"scope"` // reuses operator/v1 type
 
-    // endpointTrafficPolicy controls how external traffic is
-    // distributed to gateway proxy pods.
+    // endpointTrafficPolicy controls how external traffic is routed to
+    // proxy pods.
     //
-    // Local routes external traffic only to proxy pods on the same
-    // node that receives the traffic. This preserves the source IP
-    // address and avoids cross-node (and cross-zone) hops.
-    // The load balancer must use the Service's healthCheckNodePort
-    // to health-check nodes; CIO configures this automatically for
-    // cloud load balancers via platform annotations. The OVN
-    // local-with-fallback annotation is also set when Local is used,
-    // ensuring traffic is not dropped when no local pod is available
-    // during rolling updates.
+    // Local routes traffic only to proxy pods on the receiving node,
+    // preserving source IP and avoiding cross-zone hops. The cloud LB
+    // uses healthCheckNodePort; CIO configures this via platform
+    // annotations. The OVN local-with-fallback annotation is also set
+    // to avoid drops during rolling updates.
     //
-    // Cluster allows the implementation to route external traffic to
-    // any proxy pod in the cluster, performing SNAT. Source IP is
-    // not preserved.
+    // Cluster routes to any proxy pod (with SNAT). Source IP is not
+    // preserved.
     //
     // When omitted, defaults to Local on most platforms. IBM Cloud
     // defaults to Cluster due to platform constraints.
@@ -496,178 +326,40 @@ type GatewayLoadBalancerStrategy struct {
     EndpointTrafficPolicy *GatewayEndpointTrafficPolicy `json:"endpointTrafficPolicy,omitempty"`
 }
 
-// GatewayNodePortStrategy holds parameters for a NodePort-backed
-// GatewayClass.
 type GatewayNodePortStrategy struct {
-    // endpointTrafficPolicy controls how external traffic is
-    // distributed to gateway proxy pods.
+    // endpointTrafficPolicy controls external traffic routing.
+    // When Local, the external LB MUST use Service.spec.healthCheckNodePort
+    // for health checks or traffic will be dropped on nodes without a
+    // local proxy pod.
     //
-    // Local routes external traffic only to proxy pods on the same
-    // node that receives the traffic. This preserves the source IP
-    // address and avoids cross-node hops. When Local is used, the
-    // external load balancer MUST be configured to health-check
-    // nodes using Service.spec.healthCheckNodePort. If the load
-    // balancer does not perform this health check, traffic will be
-    // dropped on nodes that have no local proxy pod.
-    //
-    // Cluster allows routing to any proxy pod (with SNAT). Source
-    // IP is not preserved, but load distribution is even regardless
-    // of pod placement.
-    //
-    // When omitted, this field is not set (the implementation
-    // default applies). Unlike LoadBalancerService, there is no
-    // platform-specific default because NodePort is used in
-    // bring-your-own-load-balancer scenarios where the external LB
-    // capabilities vary widely.
+    // When omitted, the implementation default applies. Unlike
+    // LoadBalancerService, there is no platform-specific default.
     //
     // +optional
     EndpointTrafficPolicy *GatewayEndpointTrafficPolicy `json:"endpointTrafficPolicy,omitempty"`
 }
 
-// GatewayEndpointTrafficPolicy is the externalTrafficPolicy for a
-// Gateway's Service.
 // +kubebuilder:validation:Enum=Local;Cluster
 type GatewayEndpointTrafficPolicy string
 
 const (
-    // GatewayEndpointTrafficPolicyLocal routes external traffic only
-    // to pods on the same node, preserving source IP.
-    GatewayEndpointTrafficPolicyLocal GatewayEndpointTrafficPolicy = "Local"
-
-    // GatewayEndpointTrafficPolicyCluster routes external traffic to
-    // any pod, performing SNAT.
+    GatewayEndpointTrafficPolicyLocal   GatewayEndpointTrafficPolicy = "Local"
     GatewayEndpointTrafficPolicyCluster GatewayEndpointTrafficPolicy = "Cluster"
 )
 ```
 
-#### ValidatingAdmissionPolicy Changes
+#### ValidatingAdmissionPolicy
 
-The existing VAP for GatewayClass naming is simplified to two rules:
+The existing VAP for GatewayClass naming enforces two symmetric rules:
 
-1. A GatewayClass with `controllerName:
-   openshift.io/gateway-controller/v1` MUST have a name prefixed
-   with `openshift-`.
+1. A GatewayClass with `controllerName: openshift.io/gateway-controller/v1`
+   MUST have a name prefixed with `openshift-`.
 2. A GatewayClass with the `openshift-` name prefix MUST use
    `controllerName: openshift.io/gateway-controller/v1`.
 
-The previous allowlist of exactly four names is removed. CIO creates
-GatewayClasses for `openshift-default` (hardcoded) and any entry in
-`customGatewayClasses`. A GatewayClass manually created by a user
-with the `openshift-` prefix and the OpenShift controller name is
-permitted but not managed by CIO (no defaults ConfigMap is created
-for it).
-
-#### YAML examples
-
-```yaml
-# External LoadBalancer with zone-aware routing
-apiVersion: operator.openshift.io/v1alpha1
-kind: Ingress
-metadata:
-  name: cluster
-spec:
-  gatewayAPI:
-    customGatewayClasses:
-    - name: openshift-external
-      endpointPublishingStrategy:
-        type: LoadBalancerService
-        loadBalancer:
-          scope: External
-          endpointTrafficPolicy: Local
-
-    # Internal LoadBalancer (default ETP for platform)
-    - name: openshift-internal
-      endpointPublishingStrategy:
-        type: LoadBalancerService
-        loadBalancer:
-          scope: Internal
-
-    # ClusterIP for bare-metal + OCP Route topology
-    - name: openshift-clusterip
-      endpointPublishingStrategy:
-        type: ClusterIPService
-
-    # NodePort for bring-your-own load balancer
-    - name: openshift-nodeport
-      endpointPublishingStrategy:
-        type: NodePortService
-        nodePort:
-          endpointTrafficPolicy: Local
-
-    # High-traffic class with tuned proxy resources
-    - name: openshift-production
-      endpointPublishingStrategy:
-        type: LoadBalancerService
-        loadBalancer:
-          scope: External
-          endpointTrafficPolicy: Local
-      resources:
-        requests:
-          cpu: 500m
-          memory: 512Mi
-        limits:
-          memory: 1Gi
-```
-
-### Topology Considerations
-
-#### Hypershift / Hosted Control Planes
-
-This enhancement applies to Hypershift without additional
-considerations beyond existing Gateway API support. GatewayClass
-provisioning and the Gateway API implementation run in the guest
-cluster. Platform-specific annotations in the GatewayClass defaults
-ConfigMap are derived from the guest cluster's infrastructure
-platform.
-
-#### Standalone Clusters
-
-Directly applicable. Platform annotation derivation uses the same
-logic as CIO's IngressController service provisioning.
-
-#### Single-node Deployments or MicroShift
-
-`ClusterIPService` GatewayClasses are particularly useful for SNO
-deployments where cloud load balancers are not available. No
-additional resource consumption beyond what a Gateway already requires.
-
-MicroShift has its own Gateway API support and does not use CIO, so
-this enhancement does not apply to MicroShift.
-
-#### OpenShift Kubernetes Engine
-
-Applicable on OKE clusters where Gateway API is available, subject
-to the same OSSM version dependency as for standard OCP.
-
-### Implementation Details/Notes/Constraints
-
-#### GatewayClass Defaults ConfigMap Mechanism
-
-The GatewayClass defaults ConfigMap is an Istio mechanism documented
-at https://istio.io/latest/docs/tasks/traffic-management/ingress/gateway-api/#gatewayclass-defaults.
-One ConfigMap is created per GatewayClass entry (not per Gateway
-instance). All Gateways referencing a given GatewayClass share the
-same defaults.
-
-CIO passes service configuration as `json.RawMessage` to the
-sail-operator library, which creates the ConfigMap. This is the same
-mechanism CIO uses for HPA provisioning. The required support in the
-Gateway API implementation was added in OSSM >= 3.2.4 and >= 3.3.1
-(sail-operator#1465). Backport to OCP versions using OSSM 3.0.x or
-3.1.x is not possible without an upstream cherry-pick.
-
-#### Platform Annotation Derivation
-
-CIO reuses its existing IngressController annotation-derivation logic
-to populate the GatewayClass defaults ConfigMap with the correct
-platform-specific service annotations. The derivation is based on:
-
-- `scope: External` or `scope: Internal` (from the API)
-- The cluster's `infrastructure.config.openshift.io/cluster` platform
-  type (AWS, Azure, GCP, IBM, OpenStack, etc.)
-- `endpointTrafficPolicy: Local` triggers the OVN
-  `traffic-policy.network.alpha.openshift.io/local-with-fallback: ""`
-  annotation on platforms where it applies.
+The previous hardcoded allowlist of four names is removed. The
+`openshift-` prefix is reserved for OpenShift-controller-managed classes.
+Unmanaged GatewayClasses (no OpenShift controllerName) may use any name.
 
 #### DNS Management
 
@@ -677,197 +369,178 @@ platform-specific service annotations. The derivation is based on:
 | `NodePortService`    | No              |
 | `ClusterIPService`   | No              |
 
+### Future API Extensions
+
+The following fields are planned for follow-on EPs and are **not** part
+of this EP. They are enumerated here to confirm the `GatewayParameters`
+CRD design accommodates them without breaking changes:
+
+- **`spec.resources`** (`corev1.ResourceRequirements`): Configure CPU
+  and memory requests/limits for the gateway proxy containers. Translates
+  into the `deployment.resources` key in the OSSM defaults ConfigMap.
+
+- **`spec.nodePlacement`**: Node selectors, tolerations, and affinity
+  rules for the proxy Deployment. Translates into `deployment.podAnnotations`
+  and `deployment.affinity` in the OSSM defaults ConfigMap.
+
+- **Gateway-level reuse**: `GatewayParameters` is designed as a potential
+  `gateway.spec.infrastructure.parametersRef` target in a future release,
+  enabling per-Gateway overrides without a new CRD. This requires either
+  upstream plumbing support or OSSM native support for reading the CRD,
+  and is explicitly out of scope for this EP.
+
+### Implementation Details
+
+#### OSSM ConfigMap Mechanism
+
+CIO creates one ConfigMap per GatewayClass in the `openshift-ingress`
+namespace, labeled `gateway.istio.io/defaults-for-class: <gatewayclass-name>`.
+OSSM reads this label to apply the defaults to all Gateways referencing
+that class. This mechanism requires OSSM >= 3.2.4 or >= 3.3.1.
+
+The ConfigMap is owned by CIO and must not be manually edited. Direct
+use of this ConfigMap as a customization mechanism by end users is
+explicitly unsupported and may be overwritten at any time.
+
+#### Platform Annotation Derivation
+
+CIO reuses its existing IngressController annotation logic, keyed on:
+
+- `scope: External` or `scope: Internal`
+- The cluster's infrastructure platform type
+- `endpointTrafficPolicy: Local` → OVN
+  `traffic-policy.network.alpha.openshift.io/local-with-fallback: ""`
+  annotation on applicable platforms
+
 #### Deletion Semantics
 
-When an entry is removed from `customGatewayClasses`, CIO removes
-the GatewayClass defaults ConfigMap but does not delete the
-GatewayClass resource itself. Deleting the GatewayClass while
-Gateways reference it would orphan running workloads. CIO sets a
-condition on the GatewayClass (`Accepted: False`, reason:
-`NoLongerManaged`) and records a corresponding condition on
-`Ingress/cluster` status to notify the administrator. The
-administrator is responsible for deleting the GatewayClass after
-migrating or deleting dependent Gateways.
+When a `GatewayParameters` CR is deleted, CIO removes the defaults
+ConfigMap but does not delete the `GatewayClass`. Deleting a GatewayClass
+while Gateways reference it would orphan running workloads. CIO sets a
+condition on the `GatewayParameters` status and the `GatewayClass`
+(`Accepted: False`, reason: `ParametersNotFound`) to notify the
+administrator.
 
 #### Feature Gate
 
-This enhancement is gated behind a new feature gate
-`CustomGatewayClasses`, initially added to `TechPreviewNoUpgrade`
-in `github.com/openshift/api/features/features.go`. The feature gate
-marker `+openshift:enable:FeatureGate=CustomGatewayClasses` is added
-to the relevant API fields.
+Gated behind `GatewayClassParameters` in `TechPreviewNoUpgrade`.
 
 ### Risks and Mitigations
 
-**Risk**: OSSM version dependency. The GatewayClass defaults ConfigMap
-mechanism requires OSSM >= 3.2.4 or >= 3.3.1.
+**Risk**: OSSM version dependency for the defaults ConfigMap mechanism.
 
 **Mitigation**: CIO checks the OSSM version at reconciliation time and
-sets a `Degraded` condition on `Ingress/cluster` with a clear message
-if the version requirement is not met. The feature gate prevents the
-API from being available until the cluster meets the version
-requirement on supported OCP releases.
+sets a `Degraded` condition on the `GatewayParameters` status with a
+clear message if the version requirement is not met.
 
-**Risk**: Uneven load distribution with `endpointTrafficPolicy: Local`
-on NodePort GatewayClasses when pods are not distributed evenly
-across nodes.
+**Risk**: `externalTrafficPolicy: Local` with MetalLB BGP can cause
+traffic disruption if gateway pods are not spread across all nodes —
+MetalLB withdraws BGP route advertisements from nodes without a local
+proxy pod, so pod scheduling changes cause route flaps.
 
-**Mitigation**: The API documentation for `NodePortService` +
-`endpointTrafficPolicy: Local` explicitly states the health check
-NodePort requirement and the load-distribution trade-off. Future work
-(topology spread constraints via `nodePlacement`) will allow operators
-to ensure even pod distribution.
+**Mitigation**: The field is opt-in. Documentation explicitly covers the
+MetalLB interaction and the requirement for even pod distribution.
+Future `nodePlacement` support (follow-on) will allow operators to
+ensure pods are spread across all BGP-advertising nodes.
 
-**Risk**: A user removes a `customGatewayClasses` entry while Gateways
-still reference the GatewayClass, expecting the GatewayClass to be
-deleted.
+**Risk**: ETP Local is not appropriate as a default for existing
+GatewayClasses because it could silently break customers who have
+been advised by support to rely on ETP Cluster + MetalLB. Changing
+an existing GatewayClass default requires a new GatewayClass
+(controllerName is immutable).
 
-**Mitigation**: CIO does not delete the GatewayClass on entry removal
-(documented above). A clear condition is set to guide the
-administrator. Future work may add a deletion policy field.
+**Mitigation**: `openshift-default` is unchanged. ETP Local is only
+set when explicitly configured in `GatewayParameters`.
 
-### Drawbacks
+## Alternatives
 
-- `customGatewayClasses` settings are class-level defaults applied to
-  all Gateways referencing the class. A small development Gateway and
-  a high-traffic production Gateway referencing the same class share
-  the same resource defaults and service topology. Administrators must
-  create separate GatewayClasses for different workload tiers.
-- The `openshift-` prefix requirement for all CIO-managed GatewayClass
-  names may feel restrictive, but it is necessary to ensure CIO's
-  controller name association is valid and that the prefix reservation
-  VAP can enforce it consistently.
+### Extending the `Ingress` Singleton
 
-## Alternatives (Not Implemented)
+Adding `spec.gatewayAPI.customGatewayClasses[]` to the existing
+`operator.openshift.io/v1alpha1` `Ingress` singleton was considered.
+This was rejected because:
+
+- It conflates two concerns: CRD/controller lifecycle management
+  (existing `managementMode` field) with GatewayClass infrastructure
+  configuration.
+- It requires CIO to own and create GatewayClasses on behalf of users,
+  rather than users creating their own GatewayClasses with CIO acting
+  only as a configuration reconciler.
+- The `parametersRef` pattern is the Gateway API's designed extension
+  point for this purpose and is already used by other implementations
+  (e.g. Envoy Gateway's `EnvoyProxy` CRD).
 
 ### Hardcoded GatewayClasses
 
-The prior proposal created three fixed GatewayClasses
-(`openshift-external`, `openshift-internal`, `openshift-clusterip`).
-This approach was rejected because:
+Creating fixed GatewayClasses (`openshift-external`, `openshift-internal`,
+`openshift-clusterip`) was rejected because it requires a code change
+for each new configuration combination and creates a permanent VAP
+allowlist maintenance burden.
 
-- A hardcoded allowlist requires a code change for every new
-  service configuration combination.
-- NodePort support and resource customization were explicitly deferred
-  as open questions with no clear path forward.
-- `externalTrafficPolicy` was not user-configurable; only the
-  platform-derived default applied.
-- The VAP allowlist with four fixed names is a permanent maintenance
-  burden.
+### Istio ClusterIP Alpha Annotation
+
+The annotation `networking.istio.io/service-type: ClusterIP` on a
+`Gateway` resource can configure a ClusterIP service today. This is
+rejected as a supported path because it is an undocumented private API
+that can change or be removed at any OSSM version, gives CIO no
+visibility into the configured service type, and does not compose with
+ETP configuration.
 
 ## Open Questions
 
-1. **Status per GatewayClass**: Should `Ingress/cluster` status
-   include a `gatewayClasses[]` slice with one entry per
-   `customGatewayClasses` entry, or is it sufficient to rely on
-   the GatewayClass resource's own `.status.conditions`? The latter
-   avoids duplicating status but requires administrators to query
-   GatewayClass resources separately.
+1. **`GatewayParameters` status**: What conditions should be reported?
+   At minimum: `Accepted` (CIO has found a referencing GatewayClass and
+   created the ConfigMap) and `Degraded` (OSSM version too old, ConfigMap
+   sync failure).
 
-2. **Default `endpointPublishingStrategy`**: When
-   `endpointPublishingStrategy` is omitted from an entry, should the
-   default be `LoadBalancerService` with `scope: External` (matching
-   `openshift-default` behavior), or should it be required?
+2. **Default when `endpointPublishingStrategy` is omitted**: Should it
+   default to `LoadBalancerService` with `scope: External`, or should
+   the field be required?
 
-3. **Deletion policy field**: Should we add a
-   `deletionPolicy: Delete|Retain` field to `CustomGatewayClassConfig`
-   to give administrators explicit control over whether CIO deletes
-   the GatewayClass when the entry is removed?
+3. **GatewayClass ownership**: Should CIO require the GatewayClass to
+   use the OpenShift controllerName before reconciling a referenced
+   `GatewayParameters`, or reconcile for any GatewayClass that points
+   to a `GatewayParameters` CR?
 
 ## Test Plan
 
-<!-- TODO: Fill in test plan before targeting a release. -->
-
-Tests must include:
-
-- `[OCPFeatureGate:CustomGatewayClasses]` label for the feature gate
-- `[Jira:"OCP/Network Ingress"]` label for the component
-- Unit tests for CIO controller logic (ConfigMap content derivation,
-  platform annotation selection per service type and scope)
-- E2E tests for each `endpointPublishingStrategy.type`:
-  - `LoadBalancerService` External and Internal on supported cloud
-    platforms
-  - `NodePortService` on applicable platforms
-  - `ClusterIPService` with OCP Route fronting
-- E2E tests verifying `externalTrafficPolicy: Local` behavior
-  (source IP preservation, health check NodePort set)
-- E2E tests verifying `resources` propagation to the proxy container
-- Upgrade tests: existing `openshift-default` GatewayClass unaffected
-  after upgrade
-- Tests must run on all supported platforms: AWS, Azure, GCP,
-  vSphere, Baremetal
+- `[OCPFeatureGate:GatewayClassParameters]` label on all tests
+- Unit tests: ConfigMap content derivation, platform annotation selection
+- E2E: `ClusterIPService` with OCP Route fronting on bare-metal/vSphere
+- E2E: `LoadBalancerService` External/Internal on AWS, Azure, GCP
+- E2E: `endpointTrafficPolicy: Local` — source IP preservation, health
+  check NodePort set
+- Upgrade: `openshift-default` unaffected after upgrade
 
 ## Graduation Criteria
 
-### Dev Preview -> Tech Preview
+### Dev Preview → Tech Preview
 
-- E2E tests passing on at least AWS and bare-metal platforms
-- OSSM version validation implemented and tested
-- End-user documentation draft
-- Minimum 5 tests, 7 runs per week, 95% pass rate
+- E2E tests on AWS and bare-metal
+- OSSM version check implemented
+- Documentation draft
 
-### Tech Preview -> GA
+### Tech Preview → GA
 
-- E2E tests on all supported platforms with ≥14 runs per platform
-- Upgrade and downgrade testing complete
-- SLIs defined and telemetry collected
-- User-facing documentation complete in openshift-docs
-- Deletion semantics validated in upgrade scenarios
+- E2E on all supported platforms
+- Upgrade/downgrade tested
+- openshift-docs complete
 
 ## Upgrade / Downgrade Strategy
 
-**Upgrade**: The `customGatewayClasses` field defaults to empty. No
-existing GatewayClass or Gateway resources are modified on upgrade.
+**Upgrade**: No existing GatewayClass or Gateway is modified.
 `openshift-default` behavior is unchanged.
 
-**Downgrade**: If a cluster is downgraded to a version that does not
-support `customGatewayClasses`, CIO stops reconciling the entries but
-does not delete any GatewayClass or ConfigMap resources it previously
-created. Those resources remain functional until an administrator
-manually removes them. This is consistent with how CIO handles other
-feature gate removals.
+**Downgrade**: CIO stops reconciling `GatewayParameters` CRs but does
+not delete previously created ConfigMaps or GatewayClasses. Those
+resources remain functional until an administrator manually removes them.
 
 ## Version Skew Strategy
 
-The GatewayClass defaults ConfigMap mechanism requires the Gateway API
-implementation to be at a minimum version (OSSM >= 3.2.4 / >= 3.3.1).
-CIO detects the implementation version at reconciliation time and
-reports a condition rather than attempting to create ConfigMaps that
-the implementation version cannot consume. No version skew between
-CIO and the kube-apiserver is anticipated, as this enhancement adds
-fields to an existing CRD.
-
-## Operational Aspects of API Extensions
-
-The `customGatewayClasses` field is added to the existing
-`Ingress/cluster` CRD. The CRD is managed by CIO and protected by an
-existing VAP. The field is gated by a feature gate and therefore
-invisible to clusters that have not enabled `TechPreviewNoUpgrade`.
-
-Failure modes:
-
-- **OSSM version too old**: CIO sets `Degraded` condition on
-  `Ingress/cluster` with reason `GatewayClassDefaultsUnsupported`.
-  Existing Gateways continue to function; new `customGatewayClasses`
-  entries are not reconciled.
-- **ConfigMap creation failure**: CIO retries and degrades with a
-  condition. The GatewayClass resource may exist without a ConfigMap;
-  Gateways referencing it will use implementation defaults rather than
-  the intended configuration.
-
-## Support Procedures
-
-- Check `Ingress/cluster` status conditions for
-  `GatewayClassDefaultsUnsupported` or `GatewayClassReconcileFailed`.
-- Check the GatewayClass resource's `.status.conditions` for
-  `Accepted` status.
-- CIO logs include structured events for each `customGatewayClasses`
-  reconciliation pass.
-- To disable: remove entries from `customGatewayClasses`. CIO stops
-  managing the ConfigMap; the GatewayClass is retained (see Deletion
-  Semantics).
+CIO checks the OSSM version at reconciliation time and reports a
+condition rather than creating ConfigMaps an older OSSM cannot consume.
 
 ## Infrastructure Needed
 
-No new infrastructure is needed. The implementation uses the existing
-sail-operator library integration already used for HPA provisioning.
+None. CIO already has the sail-operator library integration for ConfigMap
+management. The new CRD is registered in `openshift/api`.
