@@ -26,18 +26,9 @@ superseded-by: []
 
 ## Summary
 
-OpenShift currently has no supported way to customize how a Gateway API
-implementation provisions the Kubernetes Service, proxy Deployment, or
-proxy configuration for a GatewayClass. The upstream Gateway API
-specification defines `GatewayClass.spec.parametersRef` as the extension
-point for this purpose, and implementations such as Istio/OSSM expose
-implementation-specific mechanisms, but there is no OpenShift
-configuration layer that abstracts these details, validates input, or
-provides a stable, upgrade-safe API.
-
 This enhancement introduces `GatewayParameters`, a new cluster-scoped
-CRD in the `operator.openshift.io` API group. It is the first step in
-an OpenShift-native configuration layer for Gateway API infrastructure
+CRD in the `operator.openshift.io` API group, and establishes the first
+OpenShift-native configuration layer for Gateway API infrastructure
 customization. A `GatewayClass` references a `GatewayParameters`
 instance via `spec.parametersRef`, and the Cluster Ingress Operator
 (CIO) reconciles it into the implementation-specific configuration —
