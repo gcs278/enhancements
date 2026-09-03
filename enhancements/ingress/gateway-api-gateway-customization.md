@@ -113,11 +113,12 @@ expose services only within my cloud provider's private network.
 ### Goals
 
 - Provide a supported, stable OpenShift API for customizing the service
-  topology of a GatewayClass (LoadBalancer external/internal, NodePort,
-  ClusterIP) and endpoint traffic policy.
-- Platform-specific service configuration (cloud LB annotations, OVN
-  settings) is derived automatically — administrators express intent,
-  not platform details.
+  topology of a GatewayClass (LoadBalancer, NodePort, ClusterIP) and
+  endpoint traffic policy, using field names that mirror the Kubernetes
+  Service API.
+- The OVN `local-with-fallback` annotation is derived automatically when
+  `externalTrafficPolicy: Local` is set; all other service annotations
+  are the administrator's responsibility.
 - The API is implementation-agnostic and upgrade-safe: customizations
   survive Gateway API implementation changes without user intervention.
 - The `openshift-default` GatewayClass is unchanged.
@@ -134,6 +135,8 @@ expose services only within my cloud provider's private network.
   (`networking.istio.io/service-type`) as a supported mechanism for
   service type customization. This annotation is an unsupported private
   API and is superseded by this enhancement.
+- Automatically deriving cloud provider internal/external LB annotations.
+  Administrators set these directly on the GatewayClass or Gateway.
 - Per-Gateway resource overrides. `GatewayParameters` configures
   class-level defaults shared by all Gateways referencing the class.
 - Gateway API implementation configuration (logging, control plane
@@ -157,13 +160,13 @@ OpenShift controller name. For any such GatewayClass with a
 `spec.parametersRef` pointing to a `GatewayParameters` CR, CIO:
 
 1. Reads the `GatewayParameters` CR.
-2. Derives platform-specific service annotations from the cluster's
-   `infrastructure.config.openshift.io/cluster` resource.
-3. Creates or updates a ConfigMap in the `openshift-ingress` namespace
+2. Creates or updates a ConfigMap in the `openshift-ingress` namespace
    with the label `gateway.istio.io/defaults-for-class: <gatewayclass-name>`.
-   OSSM reads this ConfigMap to apply service type, annotations, and ETP
-   to all Gateways referencing the class.
-4. Manages DNS for `LoadBalancerService` type only.
+   OSSM reads this ConfigMap to apply service type and ETP to all
+   Gateways referencing the class.
+3. When `externalTrafficPolicy: Local` is set, automatically adds the
+   OVN `local-with-fallback` annotation on applicable platforms.
+4. Manages DNS when `service.type` is `LoadBalancer`.
 
 CIO never mutates the user's `Gateway` or `GatewayClass` resources.
 
@@ -179,8 +182,8 @@ CIO never mutates the user's `Gateway` or `GatewayClass` resources.
    metadata:
      name: clusterip-params
    spec:
-     endpointPublishingStrategy:
-       type: ClusterIPService
+     service:
+       type: ClusterIP
    ```
 
 2. The cluster administrator creates a `GatewayClass` referencing it:
@@ -225,24 +228,27 @@ CIO never mutates the user's `Gateway` or `GatewayClass` resources.
    apiVersion: operator.openshift.io/v1alpha1
    kind: GatewayParameters
    metadata:
-     name: external-zone-aware
+     name: zone-aware-params
    spec:
-     endpointPublishingStrategy:
-       type: LoadBalancerService
-       loadBalancer:
-         scope: External
-         endpointTrafficPolicy: Local
+     service:
+       type: LoadBalancer
+       externalTrafficPolicy: Local
    ```
 
 2. The cluster administrator creates a GatewayClass referencing it
    with `spec.parametersRef` (same pattern as above).
 
 3. CIO creates the ConfigMap with `service.type: LoadBalancer`,
-   the platform external LB annotation, `externalTrafficPolicy: Local`,
-   and the OVN `local-with-fallback` annotation where applicable.
+   `externalTrafficPolicy: Local`, and the OVN `local-with-fallback`
+   annotation on applicable platforms.
 
 4. Gateways referencing this class get a LoadBalancer Service with ETP
    Local. CIO manages DNS.
+
+   For an internal LoadBalancer, the administrator annotates the
+   GatewayClass or Gateway directly with the platform-specific annotation
+   (e.g. `service.beta.kubernetes.io/aws-load-balancer-internal: "true"`
+   on AWS). These annotations propagate to the provisioned Service.
 
 ### API Extensions
 
@@ -270,109 +276,62 @@ type GatewayParameters struct {
 }
 
 type GatewayParametersSpec struct {
-    // endpointPublishingStrategy defines how the Gateway's backing
-    // Service is provisioned. When omitted, defaults to an external
-    // LoadBalancer with platform defaults (matching openshift-default
-    // behavior).
+    // service configures the Kubernetes Service provisioned for Gateways
+    // referencing this GatewayClass. Fields mirror the corresponding
+    // Kubernetes Service spec fields.
     //
     // +optional
-    EndpointPublishingStrategy *GatewayEndpointPublishingStrategy `json:"endpointPublishingStrategy,omitempty"`
+    Service *GatewayServiceParameters `json:"service,omitempty"`
 
     // Future fields (not in this EP):
-    //   resources     *corev1.ResourceRequirements
-    //   nodePlacement *NodePlacement
-}
-```
-
-#### `GatewayEndpointPublishingStrategy`
-
-```go
-// +union
-// +kubebuilder:validation:XValidation:rule="self.type != 'LoadBalancerService' || has(self.loadBalancer)",message="loadBalancer is required when type is LoadBalancerService"
-// +kubebuilder:validation:XValidation:rule="self.type == 'LoadBalancerService' || !has(self.loadBalancer)",message="loadBalancer is only valid when type is LoadBalancerService"
-// +kubebuilder:validation:XValidation:rule="self.type == 'NodePortService' || !has(self.nodePort)",message="nodePort is only valid when type is NodePortService"
-type GatewayEndpointPublishingStrategy struct {
-    // type is the publishing strategy.
-    //
-    // LoadBalancerService: provisions a cloud or hardware LoadBalancer
-    // Service. CIO applies platform-specific annotations and manages DNS.
-    //
-    // NodePortService: provisions a NodePort Service. No DNS is managed.
-    // The administrator is responsible for the external load balancer.
-    //
-    // ClusterIPService: provisions a ClusterIP Service accessible only
-    // within the cluster. No DNS is managed. Useful for fronting with
-    // an OCP Route on bare-metal clusters.
-    //
-    // +unionDiscriminator
-    // +required
-    // +kubebuilder:validation:Enum=LoadBalancerService;NodePortService;ClusterIPService
-    Type GatewayEndpointPublishingStrategyType `json:"type"`
-
-    // loadBalancer holds parameters for the LoadBalancer service type.
-    // +optional
-    LoadBalancer *GatewayLoadBalancerStrategy `json:"loadBalancer,omitempty"`
-
-    // nodePort holds parameters for the NodePort service type.
-    // +optional
-    NodePort *GatewayNodePortStrategy `json:"nodePort,omitempty"`
+    //   deployment *GatewayDeploymentParameters
 }
 
-type GatewayEndpointPublishingStrategyType string
-
-const (
-    GatewayStrategyLoadBalancerService GatewayEndpointPublishingStrategyType = "LoadBalancerService"
-    GatewayStrategyNodePortService     GatewayEndpointPublishingStrategyType = "NodePortService"
-    GatewayStrategyClusterIPService    GatewayEndpointPublishingStrategyType = "ClusterIPService"
-)
-
-type GatewayLoadBalancerStrategy struct {
-    // scope is External or Internal. External provisions a public-facing
-    // LB; Internal provisions a private LB with platform-specific internal
-    // annotations (e.g. service.beta.kubernetes.io/aws-load-balancer-internal).
+// GatewayServiceParameters mirrors selected Kubernetes Service spec fields,
+// allowing administrators to configure how the Gateway API implementation
+// provisions the backing Service for a GatewayClass.
+type GatewayServiceParameters struct {
+    // type specifies the type of Kubernetes Service to provision.
+    // Mirrors the Kubernetes Service spec.type field.
     //
-    // +required
-    Scope LoadBalancerScope `json:"scope"` // reuses operator/v1 type
-
-    // endpointTrafficPolicy controls how external traffic is routed to
-    // proxy pods.
+    // LoadBalancer provisions a cloud or hardware load balancer.
+    // CIO manages DNS automatically.
     //
-    // Local routes traffic only to proxy pods on the receiving node,
-    // preserving source IP and avoiding cross-zone hops. The cloud LB
-    // uses healthCheckNodePort; CIO configures this via platform
-    // annotations. The OVN local-with-fallback annotation is also set
-    // to avoid drops during rolling updates.
+    // NodePort provisions a NodePort Service. No DNS is managed.
+    // The administrator is responsible for configuring an external
+    // load balancer. When externalTrafficPolicy is Local, the external
+    // load balancer MUST health-check nodes via
+    // Service.spec.healthCheckNodePort.
     //
-    // Cluster routes to any proxy pod (with SNAT). Source IP is not
-    // preserved.
+    // ClusterIP provisions a ClusterIP Service accessible only within
+    // the cluster. No DNS is managed. Useful for fronting with an OCP
+    // Route on bare-metal clusters without a hardware load balancer.
     //
-    // When omitted, defaults to Local on most platforms. IBM Cloud
-    // defaults to Cluster due to platform constraints.
+    // When omitted, defaults to LoadBalancer.
     //
     // +optional
-    EndpointTrafficPolicy *GatewayEndpointTrafficPolicy `json:"endpointTrafficPolicy,omitempty"`
-}
+    // +kubebuilder:validation:Enum=LoadBalancer;NodePort;ClusterIP
+    Type *corev1.ServiceType `json:"type,omitempty"`
 
-type GatewayNodePortStrategy struct {
-    // endpointTrafficPolicy controls external traffic routing.
-    // When Local, the external LB MUST use Service.spec.healthCheckNodePort
-    // for health checks or traffic will be dropped on nodes without a
-    // local proxy pod.
+    // externalTrafficPolicy specifies how external traffic is routed to
+    // Gateway proxy pods. Mirrors the Kubernetes Service
+    // spec.externalTrafficPolicy field. Only meaningful when type is
+    // LoadBalancer or NodePort.
     //
-    // When omitted, the implementation default applies. Unlike
-    // LoadBalancerService, there is no platform-specific default.
+    // Local routes external traffic only to proxy pods on the receiving
+    // node, preserving source IP and avoiding cross-zone hops. CIO
+    // automatically adds the OVN local-with-fallback annotation on
+    // applicable platforms to prevent traffic drops during rolling updates.
+    //
+    // Cluster routes traffic to any proxy pod (with SNAT). Source IP
+    // is not preserved.
+    //
+    // When omitted, the Gateway API implementation default applies.
     //
     // +optional
-    EndpointTrafficPolicy *GatewayEndpointTrafficPolicy `json:"endpointTrafficPolicy,omitempty"`
+    // +kubebuilder:validation:Enum=Local;Cluster
+    ExternalTrafficPolicy *corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
 }
-
-// +kubebuilder:validation:Enum=Local;Cluster
-type GatewayEndpointTrafficPolicy string
-
-const (
-    GatewayEndpointTrafficPolicyLocal   GatewayEndpointTrafficPolicy = "Local"
-    GatewayEndpointTrafficPolicyCluster GatewayEndpointTrafficPolicy = "Cluster"
-)
 ```
 
 #### ValidatingAdmissionPolicy
@@ -390,11 +349,11 @@ Unmanaged GatewayClasses (no OpenShift controllerName) may use any name.
 
 #### DNS Management
 
-| `type`               | CIO manages DNS |
-|----------------------|-----------------|
-| `LoadBalancerService`| Yes             |
-| `NodePortService`    | No              |
-| `ClusterIPService`   | No              |
+| `service.type`  | CIO manages DNS |
+|-----------------|-----------------|
+| `LoadBalancer`  | Yes             |
+| `NodePort`      | No              |
+| `ClusterIP`     | No              |
 
 ### Future API Extensions
 
@@ -431,13 +390,16 @@ explicitly unsupported and may be overwritten at any time.
 
 #### Platform Annotation Derivation
 
-CIO reuses its existing IngressController annotation logic, keyed on:
+CIO derives one platform-specific annotation automatically:
 
-- `scope: External` or `scope: Internal`
-- The cluster's infrastructure platform type
-- `endpointTrafficPolicy: Local` → OVN
+- `externalTrafficPolicy: Local` → OVN
   `traffic-policy.network.alpha.openshift.io/local-with-fallback: ""`
-  annotation on applicable platforms
+  on applicable platforms, preventing traffic drops during rolling updates.
+
+All other service annotations (e.g. cloud provider internal/external LB
+annotations) are the administrator's responsibility and should be set
+directly on the GatewayClass or Gateway resource, where they propagate
+to the provisioned Service.
 
 #### Deletion Semantics
 
@@ -480,6 +442,33 @@ an existing GatewayClass default requires a new GatewayClass
 set when explicitly configured in `GatewayParameters`.
 
 ## Alternatives
+
+### Abstracted API (IngressController-Style)
+
+An earlier draft of this EP used a discriminated union abstraction
+modelled on the IngressController `EndpointPublishingStrategy`:
+
+```yaml
+spec:
+  endpointPublishingStrategy:
+    type: LoadBalancerService
+    loadBalancer:
+      scope: External
+      endpointTrafficPolicy: Local
+```
+
+This was rejected in favour of passthrough field mirroring because:
+
+- Administrators who know Kubernetes already know `service.type: ClusterIP`
+  and `externalTrafficPolicy: Local`. A translation layer (`ClusterIPService`,
+  `endpointTrafficPolicy`) adds cognitive overhead with no benefit.
+- Mirroring stable Kubernetes API field names means the OpenShift API
+  is less likely to need changes as Kubernetes evolves.
+- The abstraction required an `Internal`/`External` scope discriminator
+  that has no Kubernetes equivalent, forcing a hybrid of mirrored and
+  invented fields in the same struct.
+- Other Gateway API implementations (e.g. Envoy Gateway) use the
+  mirroring approach for the same reasons.
 
 ### Extending the `Ingress` Singleton
 
