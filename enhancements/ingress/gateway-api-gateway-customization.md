@@ -26,34 +26,61 @@ superseded-by: []
 
 ## Summary
 
-This enhancement introduces a new `GatewayParameters` CRD in the
-`operator.openshift.io` API group. A `GatewayClass` references a
-`GatewayParameters` instance via `spec.parametersRef`, and the Cluster
-Ingress Operator (CIO) reconciles it into an OSSM GatewayClass defaults
-ConfigMap. This provides a first-class, implementation-agnostic API for
-customizing how Gateway API implementations provision the backing
-Kubernetes Service and proxy deployment for a GatewayClass.
+OpenShift currently has no supported way to customize how a Gateway API
+implementation provisions the Kubernetes Service, proxy Deployment, or
+proxy configuration for a GatewayClass. The upstream Gateway API
+specification defines `GatewayClass.spec.parametersRef` as the extension
+point for this purpose, and implementations such as Istio/OSSM expose
+implementation-specific mechanisms, but there is no OpenShift
+configuration layer that abstracts these details, validates input, or
+provides a stable, upgrade-safe API.
 
-This EP implements two use cases: ClusterIP service type and
-`externalTrafficPolicy: Local`. The `GatewayParameters` CRD is designed
-to be extended with additional fields (resource requests, node
-placement) in follow-on work without API changes to the GatewayClass
-or Gateway resources.
+This enhancement introduces `GatewayParameters`, a new cluster-scoped
+CRD in the `operator.openshift.io` API group. It is the first step in
+an OpenShift-native configuration layer for Gateway API infrastructure
+customization. A `GatewayClass` references a `GatewayParameters`
+instance via `spec.parametersRef`, and the Cluster Ingress Operator
+(CIO) reconciles it into the implementation-specific configuration —
+today, the OSSM GatewayClass defaults ConfigMap. The API is
+implementation-agnostic: the OpenShift types abstract the underlying
+mechanism so that future changes to the Gateway API implementation do
+not require API changes or user migrations.
+
+This EP establishes the plumbing and implements two concrete use cases:
+ClusterIP service type and `externalTrafficPolicy: Local`. The
+`GatewayParameters` CRD is designed to be extended with additional
+fields (resource requests, node placement, proxy configuration) in
+follow-on EPs without breaking changes to the GatewayClass or Gateway
+resources.
 
 ## Motivation
 
-When a user creates a Gateway using the `openshift-default` GatewayClass,
-the Gateway API implementation always provisions an external LoadBalancer
-service. There is currently no supported, declarative way to:
+OpenShift ships Gateway API via OSSM, which supports customization of
+the backing Service and proxy Deployment through implementation-specific
+mechanisms (GatewayClass defaults ConfigMap, alpha annotations). These
+mechanisms are undocumented, unsupported for end users, and tied to
+Istio internals. There is no OpenShift API that:
 
-- Use a ClusterIP service for cluster-internal traffic or to front with
-  an OCP Route on bare-metal without a hardware load balancer
-- Configure `externalTrafficPolicy: Local` to preserve source IP and
-  avoid cross-zone hops in zone-aware or BGP-based cluster topologies
+- Provides a stable, validated interface for Gateway infrastructure
+  customization
+- Abstracts implementation details so customizations survive Gateway
+  API implementation changes
+- Integrates with CIO to derive platform-specific configuration
+  (cloud LB annotations, OVN settings) automatically
 
-Users who need these configurations today must use the Istio ClusterIP
-alpha annotation or manually patch the Service after creation — both
-unsupported, fragile approaches that break on reconciliation or upgrade.
+As a result, when a user creates a Gateway using the `openshift-default`
+GatewayClass, the implementation always provisions an external
+LoadBalancer service, and there is no supported path to change this.
+Specific gaps that generate support exceptions today:
+
+- ClusterIP service type for bare-metal deployments fronted by an OCP
+  Route, where no hardware or software load balancer is available
+- `externalTrafficPolicy: Local` for zone-aware or BGP-based topologies
+  where cross-zone hops must be avoided and source IP must be preserved
+
+Users who need these configurations must use the Istio ClusterIP alpha
+annotation or manually patch the Service — both fragile approaches that
+are overwritten on reconciliation and unsupported for production use.
 
 ### User Stories
 
