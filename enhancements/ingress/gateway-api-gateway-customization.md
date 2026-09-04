@@ -283,28 +283,6 @@ type GatewayParameters struct {
 
 // GatewayParametersStatus is the observed state of a GatewayParameters resource.
 type GatewayParametersStatus struct {
-    // conditions describe the current state of the GatewayParameters resource.
-    //
-    // Known condition types:
-    //
-    // * "Accepted" indicates whether the ingress operator has accepted this
-    //   GatewayParameters and successfully reconciled it into the Gateway API
-    //   implementation configuration. Reasons:
-    //     - Accepted: A GatewayClass referencing this resource was found and
-    //       the implementation configuration has been applied.
-    //     - InvalidParameters: The spec contains invalid or unsupported values.
-    //     - ImplementationNotReady: The Gateway API implementation version does
-    //       not support the configuration mechanism required by this resource.
-    //     - NoReferencingGatewayClass: No GatewayClass with the OpenShift
-    //       controller name references this resource.
-    //     - Pending: This resource has not yet been reconciled.
-    //
-    // +listType=map
-    // +listMapKey=type
-    // +optional
-    // +kubebuilder:validation:MaxItems=8
-    Conditions []metav1.Condition `json:"conditions,omitempty"`
-
     // observedGeneration is the most recent generation observed by the operator.
     // +optional
     ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -485,9 +463,8 @@ guaranteed.
 When a `GatewayParameters` CR is deleted, CIO removes the defaults
 ConfigMap but does not delete the `GatewayClass`. Deleting a GatewayClass
 while Gateways reference it would orphan running workloads. CIO sets a
-condition on the `GatewayParameters` status and the `GatewayClass`
-(`Accepted: False`, reason: `ParametersNotFound`) to notify the
-administrator.
+condition on the referencing `GatewayClass` status (`Accepted: False`,
+reason: `InvalidParameters`) to notify the administrator.
 
 #### Feature Gate
 
@@ -498,8 +475,8 @@ Gated behind `GatewayClassParameters` in `TechPreviewNoUpgrade`.
 **Risk**: OSSM version dependency for the defaults ConfigMap mechanism.
 
 **Mitigation**: CIO checks the OSSM version at reconciliation time and
-sets a `Degraded` condition on the `GatewayParameters` status with a
-clear message if the version requirement is not met.
+sets a condition on the referencing `GatewayClass` status with a clear
+message if the version requirement is not met.
 
 **Risk**: `externalTrafficPolicy: Local` with MetalLB BGP can cause
 traffic disruption if gateway pods are not spread across all nodes —
@@ -618,11 +595,7 @@ the goal of an implementation-agnostic OpenShift configuration layer.
    in all OSSM versions that support this feature? This must be confirmed
    before the opt-out path can be relied upon.
 
-2. **Default when `endpointPublishingStrategy` is omitted**: Should it
-   default to `LoadBalancerService` with `scope: External`, or should
-   the field be required?
-
-3. **GatewayClass ownership**: Should CIO require the GatewayClass to
+2. **GatewayClass ownership**: Should CIO require the GatewayClass to
    use the OpenShift controllerName before reconciling a referenced
    `GatewayParameters`, or reconcile for any GatewayClass that points
    to a `GatewayParameters` CR?
