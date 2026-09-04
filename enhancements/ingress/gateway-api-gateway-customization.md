@@ -229,7 +229,7 @@ CIO never mutates the user's `Gateway` or `GatewayClass` resources.
    spec:
      service:
        type: LoadBalancer
-       externalTrafficPolicy: Local
+       externalTrafficPolicy: LocalWithFallback
    ```
 
 2. The cluster administrator creates a GatewayClass referencing it
@@ -296,8 +296,8 @@ type GatewayServiceParameters struct {
     //
     // NodePort provisions a NodePort Service. No DNS is managed.
     // The administrator is responsible for configuring an external
-    // load balancer. When externalTrafficPolicy is Local, the external
-    // load balancer MUST health-check nodes via
+    // load balancer. When externalTrafficPolicy is LocalWithFallback,
+    // the external load balancer MUST health-check nodes via
     // Service.spec.healthCheckNodePort.
     //
     // ClusterIP provisions a ClusterIP Service accessible only within
@@ -311,24 +311,43 @@ type GatewayServiceParameters struct {
     Type *corev1.ServiceType `json:"type,omitempty"`
 
     // externalTrafficPolicy specifies how external traffic is routed to
-    // Gateway proxy pods. Mirrors the Kubernetes Service
-    // spec.externalTrafficPolicy field. Only meaningful when type is
-    // LoadBalancer or NodePort.
+    // Gateway proxy pods. Only meaningful when type is LoadBalancer or
+    // NodePort.
     //
-    // Local routes external traffic only to proxy pods on the receiving
-    // node, preserving source IP and avoiding cross-zone hops. CIO
-    // automatically adds the OVN local-with-fallback annotation on
-    // applicable platforms to prevent traffic drops during rolling updates.
+    // LocalWithFallback sets Kubernetes externalTrafficPolicy to Local,
+    // preserving source IP and preferring the local node to avoid
+    // cross-zone hops. On applicable platforms, CIO also sets the OVN
+    // local-with-fallback annotation so that traffic is not dropped on
+    // nodes without a local proxy pod during rolling updates or uneven
+    // pod scheduling.
     //
     // Cluster routes traffic to any proxy pod (with SNAT). Source IP
-    // is not preserved.
+    // is not preserved but load distribution is even regardless of pod
+    // placement.
     //
     // When omitted, the Gateway API implementation default applies.
     //
     // +optional
-    // +kubebuilder:validation:Enum=Local;Cluster
-    ExternalTrafficPolicy *corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
+    // +kubebuilder:validation:Enum=LocalWithFallback;Cluster
+    ExternalTrafficPolicy *GatewayExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
 }
+
+// GatewayExternalTrafficPolicy specifies how external traffic is routed
+// to Gateway proxy pods.
+// +kubebuilder:validation:Enum=LocalWithFallback;Cluster
+type GatewayExternalTrafficPolicy string
+
+const (
+    // GatewayExternalTrafficPolicyLocalWithFallback sets
+    // externalTrafficPolicy: Local on the backing Service and, on
+    // applicable platforms, adds the OVN local-with-fallback annotation
+    // to prevent traffic drops when no local proxy pod is present.
+    GatewayExternalTrafficPolicyLocalWithFallback GatewayExternalTrafficPolicy = "LocalWithFallback"
+
+    // GatewayExternalTrafficPolicyCluster routes traffic to any proxy
+    // pod in the cluster (with SNAT). Source IP is not preserved.
+    GatewayExternalTrafficPolicyCluster GatewayExternalTrafficPolicy = "Cluster"
+)
 ```
 
 #### ValidatingAdmissionPolicy
@@ -458,11 +477,11 @@ spec:
       endpointTrafficPolicy: Local
 ```
 
-This was rejected in favour of passthrough field mirroring because:
+This was rejected in favour of mirroring Kubernetes field names because:
 
-- Administrators who know Kubernetes already know `service.type: ClusterIP`
-  and `externalTrafficPolicy: Local`. A translation layer (`ClusterIPService`,
-  `endpointTrafficPolicy`) adds cognitive overhead with no benefit.
+- Administrators who know Kubernetes already know `service.type: ClusterIP`.
+  A translation layer (`ClusterIPService`, `endpointTrafficPolicy`) adds
+  cognitive overhead with no benefit.
 - Mirroring stable Kubernetes API field names means the OpenShift API
   is less likely to need changes as Kubernetes evolves.
 - The abstraction required an `Internal`/`External` scope discriminator
@@ -470,6 +489,12 @@ This was rejected in favour of passthrough field mirroring because:
   invented fields in the same struct.
 - Other Gateway API implementations (e.g. Envoy Gateway) use the
   mirroring approach for the same reasons.
+
+Note: `externalTrafficPolicy` field values are OpenShift-specific
+(`LocalWithFallback`, `Cluster`) rather than pure Kubernetes passthroughs,
+because the OpenShift value carries additional platform behaviour (OVN
+local-with-fallback) that plain Kubernetes `Local` does not. The field
+name mirrors Kubernetes; the values make the delivered behaviour explicit.
 
 ### Extending the `Ingress` Singleton
 
@@ -489,10 +514,11 @@ This was rejected because:
 
 ### Hardcoded GatewayClasses
 
-Creating fixed GatewayClasses (`openshift-external`, `openshift-internal`,
-`openshift-clusterip`) was rejected because it requires a code change
-for each new configuration combination and creates a permanent VAP
-allowlist maintenance burden.
+[A prior proposal](https://github.com/openshift/enhancements/pull/1990)
+created fixed GatewayClasses (`openshift-external`, `openshift-internal`,
+`openshift-clusterip`). This was rejected because it requires a code
+change for each new configuration combination and creates a permanent
+VAP allowlist maintenance burden.
 
 ### Wait for Upstream Standardization
 
