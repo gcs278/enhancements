@@ -93,7 +93,9 @@ emerge.
 As a cluster administrator running on bare metal without a hardware
 load balancer, I want to create a GatewayClass that provisions Gateways
 with a ClusterIP service so that I can front the Gateway with an OCP
-Route using the existing HAProxy ingress infrastructure.
+Route using the existing HAProxy ingress infrastructure. This pattern is
+documented publicly by the Red Hat AI platform:
+[ClusterIP Gateway with OpenShift Route (re-encrypt)](https://opendatahub-io.github.io/models-as-a-service/v2.0.1/configuration-and-management/gateway-patterns/#clusterip-gateway-with-openshift-route-re-encrypt).
 
 #### Story 2: Zone-Aware External Gateway with ETP Local
 
@@ -212,7 +214,8 @@ CIO never mutates the user's `Gateway` or `GatewayClass` resources.
    ClusterIP Service. No cloud LB is created, no DNS is managed.
 
 5. The cluster administrator creates an OCP Route pointing at the
-   ClusterIP Service to expose the Gateway externally via HAProxy.
+   ClusterIP Service to expose the Gateway externally via HAProxy
+   (see [ClusterIP Gateway with OpenShift Route (re-encrypt)](https://opendatahub-io.github.io/models-as-a-service/v2.0.1/configuration-and-management/gateway-patterns/#clusterip-gateway-with-openshift-route-re-encrypt)).
 
 #### Zone-Aware LoadBalancer with ETP Local
 
@@ -299,7 +302,8 @@ type GatewayServiceParameters struct {
     //
     // ClusterIP provisions a ClusterIP Service accessible only within
     // the cluster. No DNS is managed. Useful for fronting with an OCP
-    // Route on bare-metal clusters without a hardware load balancer.
+    // Route on bare-metal clusters without a hardware load balancer;
+    // see https://opendatahub-io.github.io/models-as-a-service/v2.0.1/configuration-and-management/gateway-patterns/#clusterip-gateway-with-openshift-route-re-encrypt
     //
     // When omitted, defaults to LoadBalancer.
     //
