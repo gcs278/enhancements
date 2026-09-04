@@ -103,12 +103,6 @@ availability zones with BGP-based networking, I want to configure
 arriving in a given zone is served by the proxy pod in that same zone,
 avoiding cross-zone hops and preserving source IP.
 
-#### Story 3: Internal LoadBalancer Gateway
-
-As a cluster administrator, I want to create a GatewayClass that
-provisions Gateways with an internal LoadBalancer service, including
-the correct platform-specific internal annotations, so that I can
-expose services only within my cloud provider's private network.
 
 ### Goals
 
@@ -361,13 +355,17 @@ The following fields are planned for follow-on EPs and are **not** part
 of this EP. They are enumerated here to confirm the `GatewayParameters`
 CRD design accommodates them without breaking changes:
 
-- **`spec.resources`** (`corev1.ResourceRequirements`): Configure CPU
-  and memory requests/limits for the gateway proxy containers. Translates
-  into the `deployment.resources` key in the OSSM defaults ConfigMap.
+- **Internal LoadBalancer**: A first-class `scope: Internal` field (or
+  equivalent) that causes CIO to automatically derive and apply the
+  correct cloud provider internal LB annotation for the cluster's
+  platform. Today users set this annotation directly on the GatewayClass
+  or Gateway.
 
-- **`spec.nodePlacement`**: Node selectors, tolerations, and affinity
-  rules for the proxy Deployment. Translates into `deployment.podAnnotations`
-  and `deployment.affinity` in the OSSM defaults ConfigMap.
+- **`spec.deployment.resources`** (`corev1.ResourceRequirements`): Configure
+  CPU and memory requests/limits for the gateway proxy containers.
+
+- **`spec.deployment.nodePlacement`**: Node selectors, tolerations, and
+  affinity rules for the proxy Deployment.
 
 - **Gateway-level reuse**: `GatewayParameters` is designed as a potential
   `gateway.spec.infrastructure.parametersRef` target in a future release,
