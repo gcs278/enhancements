@@ -272,6 +272,35 @@ type GatewayParameters struct {
     Status GatewayParametersStatus `json:"status,omitempty"`
 }
 
+// GatewayParametersStatus is the observed state of a GatewayParameters resource.
+type GatewayParametersStatus struct {
+    // conditions describe the current state of the GatewayParameters resource.
+    //
+    // Known condition types:
+    //
+    // * "Accepted" indicates whether CIO has accepted this GatewayParameters
+    //   and successfully reconciled it into the Gateway API implementation
+    //   configuration. Reasons:
+    //     - Accepted: CIO found a GatewayClass referencing this resource and
+    //       the implementation configuration has been applied.
+    //     - InvalidParameters: The spec contains invalid or unsupported values.
+    //     - ImplementationNotReady: The Gateway API implementation version does
+    //       not support the configuration mechanism required by this resource.
+    //     - NoReferencingGatewayClass: No GatewayClass with the OpenShift
+    //       controller name references this resource.
+    //     - Pending: CIO has not yet reconciled this resource.
+    //
+    // +listType=map
+    // +listMapKey=type
+    // +optional
+    // +kubebuilder:validation:MaxItems=8
+    Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+    // observedGeneration is the most recent generation observed by CIO.
+    // +optional
+    ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
 type GatewayParametersSpec struct {
     // service configures the Kubernetes Service provisioned for Gateways
     // referencing this GatewayClass. Fields mirror the corresponding
@@ -316,18 +345,17 @@ type GatewayServiceParameters struct {
     //
     // LocalWithFallback sets Kubernetes externalTrafficPolicy to Local,
     // preserving source IP and preferring the local node to avoid
-    // cross-zone hops. On applicable platforms, CIO also sets the OVN
-    // local-with-fallback annotation so that traffic is not dropped on
-    // nodes without a local proxy pod during rolling updates or uneven
-    // pod scheduling.
+    // cross-zone hops. Traffic is not dropped on nodes without a local
+    // proxy pod. This is the recommended value for most deployments.
     //
     // Cluster routes traffic to any proxy pod (with SNAT). Source IP
     // is not preserved but load distribution is even regardless of pod
     // placement.
     //
-    // When omitted, the Gateway API implementation default applies.
+    // Defaults to LocalWithFallback.
     //
     // +optional
+    // +kubebuilder:default=LocalWithFallback
     // +kubebuilder:validation:Enum=LocalWithFallback;Cluster
     ExternalTrafficPolicy *GatewayExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
 }
@@ -410,16 +438,29 @@ explicitly unsupported and may be overwritten at any time.
 
 #### Platform Annotation Derivation
 
-CIO derives one platform-specific annotation automatically:
-
-- `externalTrafficPolicy: Local` → OVN
-  `traffic-policy.network.alpha.openshift.io/local-with-fallback: ""`
-  on applicable platforms, preventing traffic drops during rolling updates.
+When `externalTrafficPolicy` is `LocalWithFallback`, CIO automatically
+sets the OVN annotation `traffic-policy.network.alpha.openshift.io/local-with-fallback: ""`
+on the provisioned Service on applicable platforms. This prevents traffic
+from being dropped on nodes without a local proxy pod during rolling
+updates or uneven pod scheduling, making `LocalWithFallback` safer than
+bare Kubernetes `externalTrafficPolicy: Local`.
 
 All other service annotations (e.g. cloud provider internal/external LB
 annotations) are the administrator's responsibility and should be set
 directly on the GatewayClass or Gateway resource, where they propagate
 to the provisioned Service.
+
+#### Default ExternalTrafficPolicy and openshift-default
+
+When this feature is enabled, CIO also updates the `openshift-default`
+GatewayClass to use `LocalWithFallback` by updating its defaults
+ConfigMap. This is a deliberate behavior change: the recommended
+configuration for new and existing deployments is `LocalWithFallback`.
+
+Administrators who need `Cluster` behavior (e.g. to avoid the MetalLB
+BGP pod-scheduling constraint described in Risks) can create a custom
+GatewayClass with a `GatewayParameters` CR setting
+`externalTrafficPolicy: Cluster`.
 
 #### Deletion Semantics
 
@@ -554,10 +595,11 @@ the goal of an implementation-agnostic OpenShift configuration layer.
 
 ## Open Questions
 
-1. **`GatewayParameters` status**: What conditions should be reported?
-   At minimum: `Accepted` (CIO has found a referencing GatewayClass and
-   created the ConfigMap) and `Degraded` (OSSM version too old, ConfigMap
-   sync failure).
+1. **`openshift-default` ETP change**: Changing `openshift-default` to
+   `LocalWithFallback` is a behavior change for existing clusters. Should
+   this be gated behind the same `GatewayClassParameters` feature gate,
+   or should it be a separate gate? Is the MetalLB BGP risk (see Risks)
+   significant enough to require a more cautious rollout?
 
 2. **Default when `endpointPublishingStrategy` is omitted**: Should it
    default to `LoadBalancerService` with `scope: External`, or should
