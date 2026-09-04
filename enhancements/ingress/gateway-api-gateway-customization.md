@@ -97,7 +97,16 @@ Route using the existing HAProxy ingress infrastructure. This pattern is
 documented publicly by the Red Hat AI platform:
 [ClusterIP Gateway with OpenShift Route (re-encrypt)](https://opendatahub-io.github.io/models-as-a-service/v2.0.1/configuration-and-management/gateway-patterns/#clusterip-gateway-with-openshift-route-re-encrypt).
 
-#### Story 2: Zone-Aware External Gateway with ETP Local
+#### Story 2: Cost-Efficient Gateway on Clusters with an Existing Load Balancer
+
+As a cluster administrator whose cluster already has an IngressController
+backed by a cloud load balancer, I want to create a GatewayClass that
+provisions Gateways with a ClusterIP service so that I can expose Gateway
+traffic through the existing OCP Route and HAProxy infrastructure rather
+than provisioning a second cloud load balancer, reducing cost while
+accepting the additional hop through the IngressController.
+
+#### Story 3: Zone-Aware External Gateway with ETP Local
 
 As a cluster administrator running a cluster across multiple
 availability zones with BGP-based networking, I want to configure
