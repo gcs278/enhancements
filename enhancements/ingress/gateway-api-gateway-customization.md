@@ -450,17 +450,25 @@ annotations) are the administrator's responsibility and should be set
 directly on the GatewayClass or Gateway resource, where they propagate
 to the provisioned Service.
 
-#### Default ExternalTrafficPolicy and openshift-default
+#### Default ExternalTrafficPolicy and Interaction with Global Patch
 
-When this feature is enabled, CIO also updates the `openshift-default`
-GatewayClass to use `LocalWithFallback` by updating its defaults
-ConfigMap. This is a deliberate behavior change: the recommended
-configuration for new and existing deployments is `LocalWithFallback`.
+CIO already manages a global Sail Helm `values.gatewayClasses` patch
+that applies service and deployment configuration to all CIO-managed
+GatewayClasses. When this feature is enabled, CIO sets
+`externalTrafficPolicy: Local` and the OVN `local-with-fallback`
+annotation in that global patch, making `LocalWithFallback` the default
+for all CIO-managed GatewayClasses — including `openshift-default` —
+without requiring a per-class ConfigMap for the common case.
 
-Administrators who need `Cluster` behavior (e.g. to avoid the MetalLB
-BGP pod-scheduling constraint described in Risks) can create a custom
-GatewayClass with a `GatewayParameters` CR setting
-`externalTrafficPolicy: Cluster`.
+The per-class `gateway.istio.io/defaults-for-class` ConfigMap (created
+by CIO when a `GatewayParameters` CR is present) takes precedence over
+the global patch for that specific class. A `GatewayParameters` CR with
+`externalTrafficPolicy: Cluster` therefore produces a per-class ConfigMap
+that overrides the global `LocalWithFallback` default for that class only.
+
+This interaction must be confirmed against the OSSM/Sail implementation
+to ensure per-class ConfigMap precedence over the global patch is
+guaranteed.
 
 #### Deletion Semantics
 
@@ -595,11 +603,13 @@ the goal of an implementation-agnostic OpenShift configuration layer.
 
 ## Open Questions
 
-1. **`openshift-default` ETP change**: Changing `openshift-default` to
-   `LocalWithFallback` is a behavior change for existing clusters. Should
-   this be gated behind the same `GatewayClassParameters` feature gate,
-   or should it be a separate gate? Is the MetalLB BGP risk (see Risks)
-   significant enough to require a more cautious rollout?
+1. **Global ETP default behavior change**: Setting `LocalWithFallback` via
+   the global `values.gatewayClasses` patch is a behavior change for
+   existing clusters using `openshift-default`. Should this be gated
+   behind the same `GatewayClassParameters` feature gate or a separate
+   one? Confirmed: does the per-class `gateway.istio.io/defaults-for-class`
+   ConfigMap take precedence over the global patch in all OSSM versions
+   that support this feature?
 
 2. **Default when `endpointPublishingStrategy` is omitted**: Should it
    default to `LoadBalancerService` with `scope: External`, or should
