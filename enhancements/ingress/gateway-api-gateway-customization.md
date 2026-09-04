@@ -318,8 +318,6 @@ type GatewayParametersSpec struct {
     // +optional
     Service *GatewayServiceParameters `json:"service,omitempty"`
 
-    // Future fields (not in this EP):
-    //   deployment *GatewayDeploymentParameters
 }
 
 // GatewayServiceParameters mirrors selected Kubernetes Service spec fields,
