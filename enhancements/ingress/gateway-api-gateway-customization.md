@@ -112,9 +112,9 @@ avoiding cross-zone hops and preserving source IP.
   topology of a GatewayClass (LoadBalancer, NodePort, ClusterIP) and
   endpoint traffic policy, using field names that mirror the Kubernetes
   Service API.
-- The OVN `local-with-fallback` annotation is derived automatically when
-  `externalTrafficPolicy: Local` is set; all other service annotations
-  are the administrator's responsibility.
+- Where CIO can derive platform-specific configuration from the user's
+  expressed intent, it does so automatically — administrators express
+  what they want, not how to achieve it on a given platform.
 - The API is implementation-agnostic and upgrade-safe: customizations
   survive Gateway API implementation changes without user intervention.
 - The `openshift-default` GatewayClass is unchanged.
