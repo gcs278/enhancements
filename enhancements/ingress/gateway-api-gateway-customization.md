@@ -454,11 +454,14 @@ to the provisioned Service.
 
 CIO already manages a global Sail Helm `values.gatewayClasses` patch
 that applies service and deployment configuration to all CIO-managed
-GatewayClasses. When this feature is enabled, CIO sets
+GatewayClasses. When the `GatewayClassParameters` feature gate is enabled, CIO sets
 `externalTrafficPolicy: Local` and the OVN `local-with-fallback`
 annotation in that global patch, making `LocalWithFallback` the default
 for all CIO-managed GatewayClasses — including `openshift-default` —
-without requiring a per-class ConfigMap for the common case.
+without requiring a per-class ConfigMap for the common case. The global
+default change and the opt-out mechanism (`GatewayParameters` CRD) are
+introduced atomically under the same feature gate so that the default
+is never changed without an opt-out being available.
 
 The per-class `gateway.istio.io/defaults-for-class` ConfigMap (created
 by CIO when a `GatewayParameters` CR is present) takes precedence over
@@ -603,13 +606,10 @@ the goal of an implementation-agnostic OpenShift configuration layer.
 
 ## Open Questions
 
-1. **Global ETP default behavior change**: Setting `LocalWithFallback` via
-   the global `values.gatewayClasses` patch is a behavior change for
-   existing clusters using `openshift-default`. Should this be gated
-   behind the same `GatewayClassParameters` feature gate or a separate
-   one? Confirmed: does the per-class `gateway.istio.io/defaults-for-class`
-   ConfigMap take precedence over the global patch in all OSSM versions
-   that support this feature?
+1. **Per-class ConfigMap precedence**: Does the `gateway.istio.io/defaults-for-class`
+   ConfigMap take precedence over the global `values.gatewayClasses` patch
+   in all OSSM versions that support this feature? This must be confirmed
+   before the opt-out path can be relied upon.
 
 2. **Default when `endpointPublishingStrategy` is omitted**: Should it
    default to `LoadBalancerService` with `scope: External`, or should
