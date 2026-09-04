@@ -287,17 +287,17 @@ type GatewayParametersStatus struct {
     //
     // Known condition types:
     //
-    // * "Accepted" indicates whether CIO has accepted this GatewayParameters
-    //   and successfully reconciled it into the Gateway API implementation
-    //   configuration. Reasons:
-    //     - Accepted: CIO found a GatewayClass referencing this resource and
+    // * "Accepted" indicates whether the ingress operator has accepted this
+    //   GatewayParameters and successfully reconciled it into the Gateway API
+    //   implementation configuration. Reasons:
+    //     - Accepted: A GatewayClass referencing this resource was found and
     //       the implementation configuration has been applied.
     //     - InvalidParameters: The spec contains invalid or unsupported values.
     //     - ImplementationNotReady: The Gateway API implementation version does
     //       not support the configuration mechanism required by this resource.
     //     - NoReferencingGatewayClass: No GatewayClass with the OpenShift
     //       controller name references this resource.
-    //     - Pending: CIO has not yet reconciled this resource.
+    //     - Pending: This resource has not yet been reconciled.
     //
     // +listType=map
     // +listMapKey=type
@@ -305,7 +305,7 @@ type GatewayParametersStatus struct {
     // +kubebuilder:validation:MaxItems=8
     Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-    // observedGeneration is the most recent generation observed by CIO.
+    // observedGeneration is the most recent generation observed by the operator.
     // +optional
     ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
@@ -330,7 +330,7 @@ type GatewayServiceParameters struct {
     // Mirrors the Kubernetes Service spec.type field.
     //
     // LoadBalancer provisions a cloud or hardware load balancer.
-    // CIO manages DNS automatically.
+    // DNS is managed automatically by the ingress operator.
     //
     // NodePort provisions a NodePort Service. No DNS is managed.
     // The administrator is responsible for configuring an external
