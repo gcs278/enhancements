@@ -302,8 +302,7 @@ type GatewayServiceParameters struct {
     //
     // ClusterIP provisions a ClusterIP Service accessible only within
     // the cluster. No DNS is managed. Useful for fronting with an OCP
-    // Route on bare-metal clusters without a hardware load balancer;
-    // see https://opendatahub-io.github.io/models-as-a-service/v2.0.1/configuration-and-management/gateway-patterns/#clusterip-gateway-with-openshift-route-re-encrypt
+    // Route on bare-metal clusters without a hardware load balancer.
     //
     // When omitted, defaults to LoadBalancer.
     //
